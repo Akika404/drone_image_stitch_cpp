@@ -7,8 +7,18 @@
 
 #include "pos_record.hpp"
 
+struct FlightStripGroup {
+    std::vector<cv::Mat> images;
+    std::vector<PosRecord> records;
+};
+
 class PosBasedImageGrouper {
 public:
+    [[nodiscard]] static std::vector<FlightStripGroup> groupWithRecords(
+        const std::vector<cv::Mat> &images,
+        const std::vector<std::string> &image_ids,
+        const std::vector<PosRecord> &pos_records);
+
     [[nodiscard]] std::vector<std::vector<cv::Mat> > group(
         const std::vector<cv::Mat> &images,
         const std::vector<std::string> &image_ids,

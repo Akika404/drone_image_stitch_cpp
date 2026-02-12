@@ -6,10 +6,10 @@
 #include <iostream>
 #include <unordered_map>
 
-std::vector<std::vector<cv::Mat> > PosBasedImageGrouper::group(
+std::vector<FlightStripGroup> PosBasedImageGrouper::groupWithRecords(
     const std::vector<cv::Mat> &images,
     const std::vector<std::string> &image_ids,
-    const std::vector<PosRecord> &pos_records) const {
+    const std::vector<PosRecord> &pos_records) {
     if (images.empty()) {
         std::cout << "[Group] images为空，返回空分组" << std::endl;
         return {};
@@ -29,27 +29,41 @@ std::vector<std::vector<cv::Mat> > PosBasedImageGrouper::group(
     }
 
     const auto strips = groupByFlightStrips(pos_records);
-    std::vector<std::vector<cv::Mat> > groups;
+    std::vector<FlightStripGroup> groups;
     for (auto &strip: strips) {
         std::vector<PosRecord> sorted_records = strip;
         std::ranges::sort(sorted_records, [](const PosRecord &a, const PosRecord &b) {
             return a.timeSeconds() < b.timeSeconds();
         });
-        std::vector<cv::Mat> strip_images;
+        FlightStripGroup group;
         for (auto &record: sorted_records) {
             auto it = id_to_images.find(record.file_id);
             if (it != id_to_images.end() && !it->second.empty()) {
-                strip_images.push_back(it->second.front());
+                group.images.push_back(it->second.front());
+                group.records.push_back(record);
                 it->second.pop_front();
             }
         }
-        if (!strip_images.empty()) {
-            groups.push_back(strip_images);
+        if (!group.images.empty()) {
+            groups.push_back(group);
         }
     }
 
     std::cout << "[Group] 分组完成: strips=" << strips.size()
             << ", valid_groups=" << groups.size() << std::endl;
+    return groups;
+}
+
+std::vector<std::vector<cv::Mat> > PosBasedImageGrouper::group(
+    const std::vector<cv::Mat> &images,
+    const std::vector<std::string> &image_ids,
+    const std::vector<PosRecord> &pos_records) const {
+    const auto groups_with_records = groupWithRecords(images, image_ids, pos_records);
+    std::vector<std::vector<cv::Mat> > groups;
+    groups.reserve(groups_with_records.size());
+    for (const auto &group: groups_with_records) {
+        groups.push_back(group.images);
+    }
     return groups;
 }
 
