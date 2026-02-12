@@ -30,9 +30,17 @@ StitchPipelineConfig createDefaultStitchPipelineConfig() {
 }
 
 int main() {
-    string input_folder = "../images/visible/full";
-    string output_folder = "../output/visible/full";
+    constexpr string image_folder = "../images";
+
+    // visible | near | long
+    constexpr string image_type = "visible";
+
+    constexpr string group = "image_1";
+
     string pos_path = "../assets/pos.mti";
+
+    string input_folder = image_folder + "/" + image_type + "/" + group;
+    string output_folder = "../output/" + image_type + "/" + group;
 
     try {
         setNumThreads(static_cast<int>(std::thread::hardware_concurrency()));
@@ -59,18 +67,25 @@ int main() {
         StitchPipelineConfig config = createDefaultStitchPipelineConfig();
         StitchPipeline pipeline(config);
 
+        fs::path temp_output_dir = fs::path(output_folder) / "temp";
+        fs::create_directories(temp_output_dir);
+
         vector<Mat> strip_panoramas;
         for (size_t i = 0; i < groups.size(); ++i) {
             auto &strip_images = groups[i];
             if (strip_images.empty()) continue;
             if (strip_images.size() == 1) {
                 strip_panoramas.push_back(strip_images.front());
+                fs::path temp_path = temp_output_dir / ("strip_" + to_string(i) + ".jpg");
+                imwrite(temp_path.string(), strip_images.front());
                 continue;
             }
             cout << "[Main] 开始拼接航带 " << i << "，图像数: " << strip_images.size() << endl;
             Mat strip_panorama = pipeline.stitch(strip_images);
             cout << "[Main] 航带 " << i << " 拼接完成" << endl;
             strip_panoramas.push_back(strip_panorama);
+            fs::path temp_path = temp_output_dir / ("strip_" + to_string(i) + ".jpg");
+            imwrite(temp_path.string(), strip_panorama);
         }
 
         if (strip_panoramas.empty()) {
