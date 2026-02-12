@@ -8,5 +8,6 @@ find_package(OpenCV REQUIRED)
 add_executable(drone_image_stitch_cpp
         src/main.cpp
         src/stitch_pipeline.cpp
+        src/image_loader.cpp
 )
 target_link_libraries(drone_image_stitch_cpp PRIVATE ${OpenCV_LIBS})

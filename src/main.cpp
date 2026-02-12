@@ -4,45 +4,13 @@
 #include <iostream>
 
 #include "stitch_pipeline.hpp"
+#include "image_loader.hpp"
 
 namespace fs = std::filesystem;
 using namespace cv;
 using namespace cv::detail;
 using namespace std;
 using namespace uav;
-
-vector<Mat> loadImages(const string &folder) {
-    const vector<string> exts = {"jpg", "jpeg", "png", "bmp", "tiff"};
-    vector<string> paths;
-
-    for (auto &p: fs::directory_iterator(folder)) {
-        if (!p.is_regular_file()) continue;
-        string ext = p.path().extension().string();
-        if (!ext.empty() && ext[0] == '.') ext = ext.substr(1);
-        ranges::transform(ext, ext.begin(), ::tolower);
-        for (auto &e: exts) {
-            if (ext == e) paths.push_back(p.path().string());
-        }
-    }
-
-    ranges::sort(paths);
-
-    if (paths.size() < 2) {
-        throw runtime_error("至少需要两张图像进行拼接");
-    }
-
-    vector<Mat> imgs;
-    for (auto &p: paths) {
-        Mat img = imread(p);
-        if (img.empty()) {
-            cout << "读取失败: " << p << endl;
-            continue;
-        }
-        cout << "加载: " << p << endl;
-        imgs.push_back(img);
-    }
-    return imgs;
-}
 
 StitchPipelineConfig createDefaultStitchPipelineConfig() {
     StitchPipelineConfig config;
@@ -66,7 +34,7 @@ int main() {
         cout << "[Main] 输入目录: " << input_folder << endl;
         cout << "[Main] 输出目录: " << output_folder << endl;
 
-        vector<Mat> images = loadImages(input_folder);
+        vector<Mat> images = ImageLoader::load(input_folder);
         cout << "[Main] 有效图像数量: " << images.size() << endl;
 
         StitchPipelineConfig config = createDefaultStitchPipelineConfig();
