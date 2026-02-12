@@ -113,6 +113,22 @@ namespace {
         };
     }
 
+    struct StitchTuning {
+        int sift_features = 1500;
+        float match_conf = 0.35f;
+        int min_good_matches = 8;
+        int min_inliers = 6;
+    };
+
+    struct PairDiagnostics {
+        size_t kp_left = 0;
+        size_t kp_right = 0;
+        size_t good_matches = 0;
+        bool descriptors_ready = false;
+        bool homography_ok = false;
+        int inliers = 0;
+    };
+
     bool envEnabled(const char *name) {
         const char *value = std::getenv(name);
         if (!value) {
@@ -122,13 +138,55 @@ namespace {
         return text == "1" || text == "true" || text == "TRUE" || text == "on" || text == "ON";
     }
 
+    int envIntOr(const char *name, const int default_value, const int min_value) {
+        const char *value = std::getenv(name);
+        if (!value) {
+            return default_value;
+        }
+        char *end = nullptr;
+        const long parsed = std::strtol(value, &end, 10);
+        if (end == value || *end != '\0') {
+            return default_value;
+        }
+        if (parsed < min_value) {
+            return min_value;
+        }
+        return static_cast<int>(parsed);
+    }
+
+    float envFloatOr(const char *name, const float default_value, const float min_value) {
+        const char *value = std::getenv(name);
+        if (!value) {
+            return default_value;
+        }
+        char *end = nullptr;
+        const float parsed = std::strtof(value, &end);
+        if (end == value || *end != '\0') {
+            return default_value;
+        }
+        if (parsed < min_value) {
+            return min_value;
+        }
+        return parsed;
+    }
+
+    StitchTuning loadStitchTuning() {
+        StitchTuning tuning;
+        tuning.sift_features = envIntOr("STITCH_SIFT_FEATURES", tuning.sift_features, 64);
+        tuning.match_conf = envFloatOr("STITCH_MATCH_CONF", tuning.match_conf, 0.01f);
+        tuning.min_good_matches = envIntOr("STITCH_MIN_GOOD_MATCHES", tuning.min_good_matches, 4);
+        tuning.min_inliers = envIntOr("STITCH_MIN_INLIERS", tuning.min_inliers, 4);
+        return tuning;
+    }
+
     string matInfo(const Mat &img) {
         ostringstream oss;
         oss << img.cols << "x" << img.rows << ", ch=" << img.channels();
         return oss.str();
     }
 
-    void logPairDiagnostics(const Mat &left, const Mat &right, const string &stage, size_t idx) {
+    PairDiagnostics computePairDiagnostics(const Mat &left, const Mat &right, const int sift_features) {
+        PairDiagnostics diag;
         Mat left_gray;
         Mat right_gray;
         if (left.channels() == 1) {
@@ -142,23 +200,20 @@ namespace {
             cvtColor(right, right_gray, COLOR_BGR2GRAY);
         }
 
-        Ptr<SIFT> sift = SIFT::create(1500);
+        Ptr<SIFT> sift = SIFT::create(sift_features);
         vector<KeyPoint> kp_left;
         vector<KeyPoint> kp_right;
         Mat desc_left;
         Mat desc_right;
         sift->detectAndCompute(left_gray, noArray(), kp_left, desc_left);
         sift->detectAndCompute(right_gray, noArray(), kp_right, desc_right);
-
-        cout << "[" << stage << "] 失败诊断 idx=" << idx
-                << ", left={" << matInfo(left) << "}, right={" << matInfo(right) << "}"
-                << ", kp_left=" << kp_left.size()
-                << ", kp_right=" << kp_right.size();
+        diag.kp_left = kp_left.size();
+        diag.kp_right = kp_right.size();
 
         if (desc_left.empty() || desc_right.empty()) {
-            cout << ", desc_empty=true" << endl;
-            return;
+            return diag;
         }
+        diag.descriptors_ready = true;
 
         BFMatcher matcher(NORM_L2);
         vector<vector<DMatch> > knn_matches;
@@ -173,11 +228,10 @@ namespace {
                 good_matches.push_back(m[0]);
             }
         }
-        cout << ", good_matches=" << good_matches.size();
+        diag.good_matches = good_matches.size();
 
         if (good_matches.size() < 4) {
-            cout << ", homography=not_enough_matches" << endl;
-            return;
+            return diag;
         }
 
         vector<Point2f> pts_left;
@@ -192,12 +246,42 @@ namespace {
         Mat inlier_mask;
         Mat H = findHomography(pts_left, pts_right, RANSAC, 3.0, inlier_mask);
         if (H.empty()) {
-            cout << ", homography=failed" << endl;
+            return diag;
+        }
+        diag.homography_ok = true;
+        diag.inliers = countNonZero(inlier_mask);
+        return diag;
+    }
+
+    void logPairDiagnostics(
+        const Mat &left,
+        const Mat &right,
+        const string &stage,
+        size_t idx,
+        const PairDiagnostics &diag,
+        const StitchTuning &tuning) {
+        cout << "[" << stage << "] 失败诊断 idx=" << idx
+                << ", left={" << matInfo(left) << "}, right={" << matInfo(right) << "}"
+                << ", kp_left=" << diag.kp_left
+                << ", kp_right=" << diag.kp_right;
+        if (!diag.descriptors_ready) {
+            cout << ", desc_empty=true" << endl;
             return;
         }
-        const int inliers = countNonZero(inlier_mask);
-        cout << ", homography=inliers/" << good_matches.size()
-                << "=" << inliers << "/" << good_matches.size() << endl;
+        cout << ", good_matches=" << diag.good_matches
+                << "(min=" << tuning.min_good_matches << ")";
+        if (!diag.homography_ok) {
+            if (diag.good_matches < 4) {
+                cout << ", homography=not_enough_matches" << endl;
+            } else {
+                cout << ", homography=failed" << endl;
+            }
+            return;
+        }
+        const int inliers = diag.inliers;
+        cout << ", homography=inliers/good_matches="
+                << inliers << "/" << diag.good_matches
+                << "(min=" << tuning.min_inliers << ")" << endl;
     }
 
     void computeCrossTrackOrder(vector<StripPanorama> &strip_panos) {
@@ -235,7 +319,11 @@ namespace {
     }
 
     Stitcher::Status stitchWithMode(
-        const vector<Mat> &images, Mat &output, Stitcher::Mode mode, const string &stage) {
+        const vector<Mat> &images,
+        Mat &output,
+        Stitcher::Mode mode,
+        const string &stage,
+        const StitchTuning &tuning) {
         if (images.empty()) {
             return Stitcher::ERR_NEED_MORE_IMGS;
         }
@@ -253,9 +341,23 @@ namespace {
             }
         }
 
+        if (images.size() == 2) {
+            const auto diag = computePairDiagnostics(images[0], images[1], tuning.sift_features);
+            if (!diag.descriptors_ready || static_cast<int>(diag.good_matches) < tuning.min_good_matches) {
+                cout << "[" << stage << "] 阈值拦截: 匹配点不足，跳过拼接" << endl;
+                logPairDiagnostics(images[0], images[1], stage, 1, diag, tuning);
+                return Stitcher::ERR_HOMOGRAPHY_EST_FAIL;
+            }
+            if (!diag.homography_ok || diag.inliers < tuning.min_inliers) {
+                cout << "[" << stage << "] 阈值拦截: 单应内点不足，跳过拼接" << endl;
+                logPairDiagnostics(images[0], images[1], stage, 1, diag, tuning);
+                return Stitcher::ERR_HOMOGRAPHY_EST_FAIL;
+            }
+        }
+
         const Ptr<Stitcher> stitcher = Stitcher::create(mode);
-        stitcher->setFeaturesFinder(SIFT::create(1500));
-        stitcher->setFeaturesMatcher(makePtr<detail::BestOf2NearestMatcher>(false, 0.35f));
+        stitcher->setFeaturesFinder(SIFT::create(tuning.sift_features));
+        stitcher->setFeaturesMatcher(makePtr<detail::BestOf2NearestMatcher>(false, tuning.match_conf));
 
         return stitcher->stitch(images, output);
     }
@@ -263,7 +365,8 @@ namespace {
     optional<Mat> stitchSequentially(
         const vector<Mat> &images,
         const Stitcher::Mode mode,
-        const string &stage_name) {
+        const string &stage_name,
+        const StitchTuning &tuning) {
         if (images.empty()) {
             return nullopt;
         }
@@ -272,11 +375,12 @@ namespace {
             cout << "[" << stage_name << "] 序贯拼接 step: current + image[" << i << "]" << endl;
             Mat next_result;
             const vector pair = {current, images[i]};
-            const auto status = stitchWithMode(pair, next_result, mode, stage_name);
+            const auto status = stitchWithMode(pair, next_result, mode, stage_name, tuning);
             if (status != Stitcher::OK) {
                 cout << "[" << stage_name << "] 序贯拼接失败: idx=" << i
                         << ", status=" << stitchStatusToString(status) << endl;
-                logPairDiagnostics(current, images[i], stage_name, i);
+                const auto diag = computePairDiagnostics(current, images[i], tuning.sift_features);
+                logPairDiagnostics(current, images[i], stage_name, i, diag, tuning);
                 return nullopt;
             }
             cout << "[" << stage_name << "] 序贯拼接成功: idx=" << i
@@ -286,16 +390,20 @@ namespace {
         return current;
     }
 
-    Mat stitchRobustly(const vector<Mat> &images, const Stitcher::Mode mode, const string &stage_name) {
+    Mat stitchRobustly(
+        const vector<Mat> &images,
+        const Stitcher::Mode mode,
+        const string &stage_name,
+        const StitchTuning &tuning) {
         Mat output;
-        const auto first_try_status = stitchWithMode(images, output, mode, stage_name);
+        const auto first_try_status = stitchWithMode(images, output, mode, stage_name, tuning);
         if (first_try_status == Stitcher::OK) {
             return output;
         }
 
         cout << "[" << stage_name << "] 一次性拼接失败，改为序贯拼接: "
                 << stitchStatusToString(first_try_status) << endl;
-        const auto sequential = stitchSequentially(images, mode, stage_name);
+        const auto sequential = stitchSequentially(images, mode, stage_name, tuning);
         if (sequential.has_value()) {
             return sequential.value();
         }
@@ -310,7 +418,7 @@ int main() {
     constexpr string image_folder = "../images";
     // visible | near | long
     constexpr string image_type = "visible";
-    constexpr string group = "desert_1";
+    constexpr string group = "desert_2";
 
     constexpr string pos_path = "../assets/pos.mti";
 
@@ -326,6 +434,7 @@ int main() {
     const fs::path output_dir = output_path.parent_path();
     const fs::path strip_dir = output_dir / "strips";
     fs::create_directories(strip_dir);
+    const StitchTuning tuning = loadStitchTuning();
 
     try {
         cout << "[Main] 输入目录: " << input_folder << endl;
@@ -335,6 +444,11 @@ int main() {
         }
         cout << "[Main] 输出目录: " << output_folder << endl;
         cout << "[Main] 输出文件: " << output_path << endl;
+        cout << "[Main] Stitch参数: "
+                << "sift_features=" << tuning.sift_features
+                << ", match_conf=" << tuning.match_conf
+                << ", min_good_matches=" << tuning.min_good_matches
+                << ", min_inliers=" << tuning.min_inliers << endl;
 
         const auto [images, ids] = ImageLoader::loadWithIds(input_folder);
         cout << "[Main] 有效图像数量: " << images.size() << endl;
@@ -362,7 +476,7 @@ int main() {
             cout << "[Strip " << i << "] 开始航带内拼接, images="
                     << strip_groups[i].images.size() << endl;
             Mat strip_pano = stitchRobustly(
-                strip_groups[i].images, Stitcher::SCANS, "Strip " + to_string(i));
+                strip_groups[i].images, Stitcher::SCANS, "Strip " + to_string(i), tuning);
             autoCropBlackBorder(strip_pano);
 
             const fs::path strip_output = strip_dir / ("strip_" + to_string(i) + ".jpg");
@@ -391,7 +505,7 @@ int main() {
         }
 
         cout << "[Main] 开始航带间二次拼接, strip_count=" << strip_images.size() << endl;
-        Mat panorama = stitchRobustly(strip_images, Stitcher::SCANS, "Global");
+        Mat panorama = stitchRobustly(strip_images, Stitcher::SCANS, "Global", tuning);
         autoCropBlackBorder(panorama);
         imwrite(output_path.string(), panorama);
         cout << "[Finish] 拼接完成: " << output_path << endl;
