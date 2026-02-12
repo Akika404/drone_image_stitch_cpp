@@ -7,7 +7,6 @@ find_package(OpenCV REQUIRED)
 
 add_executable(drone_image_stitch_cpp
         src/main.cpp
-        src/stitch_pipeline.cpp
         src/image_loader.cpp
         src/pos_record.cpp
         src/pos_reader.cpp
