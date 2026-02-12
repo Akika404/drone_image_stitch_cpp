@@ -60,11 +60,16 @@ namespace uav {
             Mat R;
             camera.R.convertTo(R, CV_32F);
             camera.R = R;
+            camera.aspect = 1.0;
         }
 
         std::cout << "[Stitch] 开始全局优化(bundle adjustment)" << std::endl;
         config_.bundleAdjuster->setConfThresh(1.0);
-        config_.bundleAdjuster->setRefinementMask(Mat::ones(3, 3, CV_8U));
+        Mat refine_mask = Mat::zeros(3, 3, CV_8U);
+        refine_mask.at<uchar>(0, 0) = 1;
+        config_.bundleAdjuster->setRefinementMask(refine_mask);
+        config_.bundleAdjuster->setTermCriteria(TermCriteria(
+            TermCriteria::COUNT + TermCriteria::EPS, 50, 1e-3));
         (*config_.bundleAdjuster)(features, pairwise_matches, cameras);
         std::cout << "[Stitch] 全局优化完成" << std::endl;
 
@@ -95,7 +100,7 @@ namespace uav {
             warped_sizes[i] = warped[i].size();
 
             std::cout << "[Stitch] 图像 " << i << " 变换后尺寸: "
-                      << warped_sizes[i].width << "x" << warped_sizes[i].height << std::endl;
+                    << warped_sizes[i].width << "x" << warped_sizes[i].height << std::endl;
         }
 
         std::cout << "[Stitch] 开始寻找接缝线" << std::endl;
