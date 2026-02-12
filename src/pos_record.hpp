@@ -12,7 +12,7 @@ struct PosRecord {
     double heading;
     std::string file_id;
 
-    int timeSeconds() const;
+    [[nodiscard]] int timeSeconds() const;
 
-    bool isValid() const;
+    [[nodiscard]] bool isValid() const;
 };

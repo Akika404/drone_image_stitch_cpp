@@ -30,8 +30,8 @@ StitchPipelineConfig createDefaultStitchPipelineConfig() {
 }
 
 int main() {
-    string input_folder = "../images/long/image_1";
-    string output_folder = "../output/long/image_1";
+    string input_folder = "../images/visible/full";
+    string output_folder = "../output/visible/full";
     string pos_path = "../assets/pos.mti";
 
     try {
@@ -39,19 +39,19 @@ int main() {
         cout << "[Main] 输入目录: " << input_folder << endl;
         cout << "[Main] 输出目录: " << output_folder << endl;
 
-        LoadedImages loaded = ImageLoader::loadWithIds(input_folder);
-        cout << "[Main] 有效图像数量: " << loaded.images.size() << endl;
+        auto [images, ids] = ImageLoader::loadWithIds(input_folder);
+        cout << "[Main] 有效图像数量: " << images.size() << endl;
 
         auto undistortImage = [](const Mat &input) {
             return input;
         };
-        for (auto &img: loaded.images) {
+        for (auto &img: images) {
             img = undistortImage(img);
         }
 
         vector<PosRecord> pos_records = PosReader::load(pos_path);
         PosBasedImageGrouper grouper;
-        vector<vector<Mat>> groups = grouper.group(loaded.images, loaded.ids, pos_records);
+        vector<vector<Mat> > groups = grouper.group(images, ids, pos_records);
         if (groups.empty()) {
             throw std::runtime_error("未找到有效航带分组");
         }

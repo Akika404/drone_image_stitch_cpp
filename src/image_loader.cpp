@@ -74,7 +74,7 @@ LoadedImages ImageLoader::loadWithIds(const std::string &folder) {
 
     std::ranges::sort(paths);
 
-    if (paths.size() < 1) {
+    if (paths.empty()) {
         throw std::runtime_error("未找到可用图像");
     }
 

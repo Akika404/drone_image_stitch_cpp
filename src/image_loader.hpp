@@ -13,5 +13,6 @@ struct LoadedImages {
 class ImageLoader {
 public:
     static std::vector<cv::Mat> load(const std::string &folder);
+
     static LoadedImages loadWithIds(const std::string &folder);
 };

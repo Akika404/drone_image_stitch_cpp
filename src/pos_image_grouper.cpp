@@ -28,7 +28,7 @@ std::vector<std::vector<cv::Mat> > PosBasedImageGrouper::group(
         id_to_images[id].push_back(images[i]);
     }
 
-    auto strips = groupByFlightStrips(pos_records);
+    const auto strips = groupByFlightStrips(pos_records);
     std::vector<std::vector<cv::Mat> > groups;
     for (auto &strip: strips) {
         std::vector<PosRecord> sorted_records = strip;
@@ -53,12 +53,12 @@ std::vector<std::vector<cv::Mat> > PosBasedImageGrouper::group(
     return groups;
 }
 
-std::vector<std::vector<PosRecord> > PosBasedImageGrouper::groupByFlightStrips(
+auto PosBasedImageGrouper::groupByFlightStrips(
     const std::vector<PosRecord> &records,
     double heading_threshold,
     int min_strip_records,
     double stability_threshold,
-    int stability_count) const {
+    int stability_count) -> std::vector<std::vector<PosRecord> > {
     std::vector<PosRecord> valid_records;
     for (auto &r: records) {
         if (r.isValid()) valid_records.push_back(r);
@@ -152,12 +152,10 @@ std::vector<std::vector<PosRecord> > PosBasedImageGrouper::groupByFlightStrips(
 std::string PosBasedImageGrouper::normalizeImageId(const std::string &image_id) {
     std::filesystem::path p(image_id);
     std::string base = p.filename().string();
-    auto pos = base.find('_');
-    if (pos != std::string::npos) {
+    if (const auto pos = base.find('_'); pos != std::string::npos) {
         return base.substr(0, pos);
     }
-    auto dot = base.find_last_of('.');
-    if (dot != std::string::npos) {
+    if (const auto dot = base.find_last_of('.'); dot != std::string::npos) {
         return base.substr(0, dot);
     }
     return base;
@@ -182,7 +180,7 @@ double PosBasedImageGrouper::averageHeading(const std::vector<double> &headings)
     double sin_sum = 0.0;
     double cos_sum = 0.0;
     for (auto &h: headings) {
-        double rad = h * CV_PI / 180.0;
+        const double rad = h * CV_PI / 180.0;
         sin_sum += std::sin(rad);
         cos_sum += std::cos(rad);
     }
