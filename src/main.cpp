@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -111,6 +113,93 @@ namespace {
         };
     }
 
+    bool envEnabled(const char *name) {
+        const char *value = std::getenv(name);
+        if (!value) {
+            return false;
+        }
+        const string text(value);
+        return text == "1" || text == "true" || text == "TRUE" || text == "on" || text == "ON";
+    }
+
+    string matInfo(const Mat &img) {
+        ostringstream oss;
+        oss << img.cols << "x" << img.rows << ", ch=" << img.channels();
+        return oss.str();
+    }
+
+    void logPairDiagnostics(const Mat &left, const Mat &right, const string &stage, size_t idx) {
+        Mat left_gray;
+        Mat right_gray;
+        if (left.channels() == 1) {
+            left_gray = left;
+        } else {
+            cvtColor(left, left_gray, COLOR_BGR2GRAY);
+        }
+        if (right.channels() == 1) {
+            right_gray = right;
+        } else {
+            cvtColor(right, right_gray, COLOR_BGR2GRAY);
+        }
+
+        Ptr<SIFT> sift = SIFT::create(1500);
+        vector<KeyPoint> kp_left;
+        vector<KeyPoint> kp_right;
+        Mat desc_left;
+        Mat desc_right;
+        sift->detectAndCompute(left_gray, noArray(), kp_left, desc_left);
+        sift->detectAndCompute(right_gray, noArray(), kp_right, desc_right);
+
+        cout << "[" << stage << "] 失败诊断 idx=" << idx
+                << ", left={" << matInfo(left) << "}, right={" << matInfo(right) << "}"
+                << ", kp_left=" << kp_left.size()
+                << ", kp_right=" << kp_right.size();
+
+        if (desc_left.empty() || desc_right.empty()) {
+            cout << ", desc_empty=true" << endl;
+            return;
+        }
+
+        BFMatcher matcher(NORM_L2);
+        vector<vector<DMatch> > knn_matches;
+        matcher.knnMatch(desc_left, desc_right, knn_matches, 2);
+        vector<DMatch> good_matches;
+        good_matches.reserve(knn_matches.size());
+        for (const auto &m: knn_matches) {
+            if (m.size() < 2) {
+                continue;
+            }
+            if (m[0].distance < 0.75f * m[1].distance) {
+                good_matches.push_back(m[0]);
+            }
+        }
+        cout << ", good_matches=" << good_matches.size();
+
+        if (good_matches.size() < 4) {
+            cout << ", homography=not_enough_matches" << endl;
+            return;
+        }
+
+        vector<Point2f> pts_left;
+        vector<Point2f> pts_right;
+        pts_left.reserve(good_matches.size());
+        pts_right.reserve(good_matches.size());
+        for (const auto &m: good_matches) {
+            pts_left.push_back(kp_left[m.queryIdx].pt);
+            pts_right.push_back(kp_right[m.trainIdx].pt);
+        }
+
+        Mat inlier_mask;
+        Mat H = findHomography(pts_left, pts_right, RANSAC, 3.0, inlier_mask);
+        if (H.empty()) {
+            cout << ", homography=failed" << endl;
+            return;
+        }
+        const int inliers = countNonZero(inlier_mask);
+        cout << ", homography=inliers/" << good_matches.size()
+                << "=" << inliers << "/" << good_matches.size() << endl;
+    }
+
     void computeCrossTrackOrder(vector<StripPanorama> &strip_panos) {
         if (strip_panos.empty()) {
             return;
@@ -157,8 +246,14 @@ namespace {
         cout << "[" << stage << "] 创建 Stitcher, mode="
                 << (mode == Stitcher::SCANS ? "SCANS" : "PANORAMA")
                 << ", image_count=" << images.size() << endl;
+        if (envEnabled("STITCH_VERBOSE")) {
+            for (size_t i = 0; i < images.size(); ++i) {
+                cout << "[" << stage << "] 输入图 idx=" << i
+                        << ", shape={" << matInfo(images[i]) << "}" << endl;
+            }
+        }
 
-        Ptr<Stitcher> stitcher = Stitcher::create(mode);
+        const Ptr<Stitcher> stitcher = Stitcher::create(mode);
         stitcher->setFeaturesFinder(SIFT::create(1500));
         stitcher->setFeaturesMatcher(makePtr<detail::BestOf2NearestMatcher>(false, 0.35f));
 
@@ -174,14 +269,18 @@ namespace {
         }
         Mat current = images.front().clone();
         for (size_t i = 1; i < images.size(); ++i) {
+            cout << "[" << stage_name << "] 序贯拼接 step: current + image[" << i << "]" << endl;
             Mat next_result;
             const vector pair = {current, images[i]};
             const auto status = stitchWithMode(pair, next_result, mode, stage_name);
             if (status != Stitcher::OK) {
                 cout << "[" << stage_name << "] 序贯拼接失败: idx=" << i
                         << ", status=" << stitchStatusToString(status) << endl;
+                logPairDiagnostics(current, images[i], stage_name, i);
                 return nullopt;
             }
+            cout << "[" << stage_name << "] 序贯拼接成功: idx=" << i
+                    << ", output={" << matInfo(next_result) << "}" << endl;
             current = next_result;
         }
         return current;
@@ -208,38 +307,50 @@ namespace {
 } // namespace
 
 int main() {
-    const string input_folder = resolveExistingPath({
-        "output/visible/full/strips",
-        "../output/visible/full/strips"
-    }).string();
+    constexpr string image_folder = "../images";
+    // visible | near | long
+    constexpr string image_type = "visible";
+    constexpr string group = "desert_1";
 
-    const string pos_path = resolveExistingPath({
-        "assets/pos.mti",
-        "../assets/pos.mti"
-    }).string();
+    constexpr string pos_path = "../assets/pos.mti";
 
-    const string output_path_str = (
-        resolveExistingPath({"output", "../output"}) /
-        "visible/full/uav_panorama_full_1.jpg").string();
+    // false 时不加载POS，全部图片作为一组
+    constexpr bool use_pos = false;
 
-    const fs::path output_path(output_path_str);
+    const string input_folder = image_folder + "/" + image_type + "/" + group;
+    const string output_folder = "../output/" + image_type + "/" + group;
+    fs::create_directories(output_folder);
+
+    const string filename = image_type + "_" + group + "_" + "uav_panorama.jpg";
+    const fs::path output_path = fs::path(output_folder) / filename;
     const fs::path output_dir = output_path.parent_path();
     const fs::path strip_dir = output_dir / "strips";
     fs::create_directories(strip_dir);
 
     try {
         cout << "[Main] 输入目录: " << input_folder << endl;
-        cout << "[Main] POS文件: " << pos_path << endl;
+        cout << "[Main] POS开关: " << (use_pos ? "启用" : "禁用") << endl;
+        if (use_pos) {
+            cout << "[Main] POS文件: " << pos_path << endl;
+        }
+        cout << "[Main] 输出目录: " << output_folder << endl;
         cout << "[Main] 输出文件: " << output_path << endl;
 
         const auto [images, ids] = ImageLoader::loadWithIds(input_folder);
         cout << "[Main] 有效图像数量: " << images.size() << endl;
-        const auto pos_records = PosReader::load(pos_path);
-
-        PosBasedImageGrouper grouper;
-        auto strip_groups = grouper.groupWithRecords(images, ids, pos_records);
-        if (strip_groups.empty()) {
-            throw runtime_error("POS分组结果为空，请检查POS文件与图片ID是否匹配");
+        if (images.size() < 2) {
+            throw runtime_error("有效图像少于2张，无法拼接");
+        }
+        vector<FlightStripGroup> strip_groups;
+        if (use_pos) {
+            const auto pos_records = PosReader::load(pos_path);
+            strip_groups = PosBasedImageGrouper::groupWithRecords(images, ids, pos_records);
+            if (strip_groups.empty()) {
+                throw runtime_error("POS分组结果为空，请检查POS文件与图片ID是否匹配");
+            }
+        } else {
+            strip_groups.push_back({images, {}});
+            cout << "[Main] 已禁用POS，全部图片作为1组处理" << endl;
         }
 
         vector<StripPanorama> strip_panos;
