@@ -219,7 +219,8 @@ namespace {
         const cv::Stitcher::Mode mode,
         const std::string &stage,
         const StitchTuning &tuning,
-        const int range_width_override = -1) {
+        const int range_width_override = -1,
+        const cv::UMat *matching_mask = nullptr) {
         if (images.empty()) {
             return cv::Stitcher::ERR_NEED_MORE_IMGS;
         }
@@ -242,6 +243,9 @@ namespace {
 
         auto run_stitch = [&](const StitchTuning &local_tuning) -> cv::Stitcher::Status {
             cv::Ptr<cv::Stitcher> stitcher = createConfiguredStitcher(mode, local_tuning, range_width_override);
+            if (matching_mask && !matching_mask->empty()) {
+                stitcher->setMatchingMask(*matching_mask);
+            }
             logStitchPhasePlan(stage);
             const auto estimate_status = stitcher->estimateTransform(images);
             if (estimate_status != cv::Stitcher::OK) {
@@ -335,7 +339,8 @@ cv::Mat stitchRobustly(
     const std::string &stage_name,
     const StitchTuning &tuning,
     const int range_width_override,
-    const std::vector<std::string> *image_tags) {
+    const std::vector<std::string> *image_tags,
+    const cv::UMat *matching_mask) {
     if (image_tags && image_tags->size() == images.size()) {
         std::cout << "[" << stage_name << "] one-shot stitch begin, images=" << images.size() << std::endl;
         logOneShotPairPlan(stage_name, image_tags);
@@ -344,10 +349,17 @@ cv::Mat stitchRobustly(
     }
 
     cv::Mat output;
-    const auto first_try_status = stitchWithMode(images, output, mode, stage_name, tuning, range_width_override);
+    const auto first_try_status = stitchWithMode(
+        images, output, mode, stage_name, tuning, range_width_override, matching_mask);
     if (first_try_status == cv::Stitcher::OK) {
         std::cout << "[" << stage_name << "] one-shot stitch success" << std::endl;
         return output;
+    }
+
+    if (matching_mask && !matching_mask->empty()) {
+        throw std::runtime_error(
+            "[" + stage_name + "] stitch failed with matching mask: " + stitchStatusToString(first_try_status) +
+            " (code: " + std::to_string(first_try_status) + ")");
     }
 
     std::cout << "[" << stage_name << "] one-shot stitch failed, fallback to sequential: "

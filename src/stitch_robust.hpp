@@ -13,4 +13,5 @@ cv::Mat stitchRobustly(
     const std::string &stage_name,
     const StitchTuning &tuning,
     int range_width_override = -1,
-    const std::vector<std::string> *image_tags = nullptr);
+    const std::vector<std::string> *image_tags = nullptr,
+    const cv::UMat *matching_mask = nullptr);

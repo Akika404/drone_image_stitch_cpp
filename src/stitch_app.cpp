@@ -64,7 +64,7 @@ int runStitchApplication() {
 
     const std::string image_folder = "../images";
     const std::string image_type = "visible";
-    const std::string group = "image_1";
+    const std::string group = "full";
     const std::string pos_path = "../assets/pos.mti";
 
     const bool use_pos = true;
@@ -115,7 +115,23 @@ int runStitchApplication() {
                     << ", within_strip_pairs=" << input.num_within_pairs
                     << ", cross_strip_pairs=" << input.num_cross_pairs << std::endl;
 
-            panorama = stitchGlobalPipeline(input.images, input.match_mask, tuning);
+            StitchTuning global_tuning = tuning;
+            // Multi-band blending at full compose resolution is expensive for multi-strip panoramas.
+            if (global_tuning.compositing_resol_mpx < 0.0) {
+                global_tuning.compositing_resol_mpx = 2.0;
+            }
+            global_tuning.blend_bands = std::min(global_tuning.blend_bands, 3);
+            std::cout << "[Main] global speed tuning: compose_mpx=" << global_tuning.compositing_resol_mpx
+                    << ", blend_bands=" << global_tuning.blend_bands << std::endl;
+
+            panorama = stitchRobustly(
+                input.images,
+                cv::Stitcher::SCANS,
+                "Global",
+                global_tuning,
+                global_tuning.range_width,
+                nullptr,
+                &input.match_mask);
         } else {
             std::vector<cv::Mat> all_images;
             std::vector<std::string> all_tags;
