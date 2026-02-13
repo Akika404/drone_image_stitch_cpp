@@ -150,6 +150,16 @@ string imageTagAt(const vector<string> *image_tags, const size_t idx) {
     return image_tags->at(idx);
 }
 
+void logOneShotPairPlan(const string &stage_name, const vector<string> *image_tags) {
+    if (!image_tags || image_tags->size() < 2) {
+        return;
+    }
+    for (size_t i = 1; i < image_tags->size(); ++i) {
+        cout << "[" << stage_name << "] one-shot pair " << i << "/" << (image_tags->size() - 1)
+             << ": " << image_tags->at(i - 1) << " + " << image_tags->at(i) << endl;
+    }
+}
+
 void autoCropBlackBorder(Mat &pano) {
     Mat gray;
     cvtColor(pano, gray, COLOR_BGR2GRAY);
@@ -497,9 +507,17 @@ Mat stitchRobustly(
     const StitchTuning &tuning,
     const int range_width_override = -1,
     const vector<string> *image_tags = nullptr) {
+    if (image_tags && image_tags->size() == images.size()) {
+        cout << "[" << stage_name << "] one-shot stitch begin, images=" << images.size() << endl;
+        logOneShotPairPlan(stage_name, image_tags);
+    } else {
+        cout << "[" << stage_name << "] one-shot stitch begin, images=" << images.size() << endl;
+    }
+
     Mat output;
     const auto first_try_status = stitchWithMode(images, output, mode, stage_name, tuning, range_width_override);
     if (first_try_status == Stitcher::OK) {
+        cout << "[" << stage_name << "] one-shot stitch success" << endl;
         return output;
     }
 
@@ -526,7 +544,7 @@ int main() {
     fs::create_directories(temp_opencv);
     const string image_folder = "../images";
     const string image_type = "visible";
-    const string group = "image_1";
+    const string group = "image_2";
     const string pos_path = "../assets/pos.mti";
 
     const bool use_pos = envEnabled("STITCH_USE_POS", true);
