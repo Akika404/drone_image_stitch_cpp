@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -47,6 +48,12 @@ struct StitchTuning {
     bool use_blocks_gain = true;
     int blend_bands = 5;
     float pano_conf_thresh = 0.7f;
+
+    bool use_anchor_fallback = true;
+    int anchor_window = 4;
+
+    bool use_opencl = true;
+    bool try_gpu = true;
 };
 
 struct PairDiagnostics {
@@ -120,6 +127,10 @@ StitchTuning loadStitchTuning() {
     tuning.use_blocks_gain = envEnabled("STITCH_USE_BLOCKS_GAIN", tuning.use_blocks_gain);
     tuning.blend_bands = envIntOr("STITCH_BLEND_BANDS", tuning.blend_bands, 1);
     tuning.pano_conf_thresh = envFloatOr("STITCH_PANO_CONF", tuning.pano_conf_thresh, 0.01f);
+    tuning.use_anchor_fallback = envEnabled("STITCH_USE_ANCHOR_FALLBACK", tuning.use_anchor_fallback);
+    tuning.anchor_window = envIntOr("STITCH_ANCHOR_WINDOW", tuning.anchor_window, 1);
+    tuning.use_opencl = envEnabled("STITCH_USE_OPENCL", tuning.use_opencl);
+    tuning.try_gpu = envEnabled("STITCH_TRY_GPU", tuning.try_gpu);
     return tuning;
 }
 
@@ -127,6 +138,16 @@ string matInfo(const Mat &img) {
     ostringstream oss;
     oss << img.cols << "x" << img.rows << ", ch=" << img.channels();
     return oss.str();
+}
+
+string imageTagAt(const vector<string> *image_tags, const size_t idx) {
+    if (!image_tags) {
+        return "img#" + to_string(idx);
+    }
+    if (idx >= image_tags->size()) {
+        return "img#" + to_string(idx);
+    }
+    return image_tags->at(idx);
 }
 
 void autoCropBlackBorder(Mat &pano) {
@@ -344,6 +365,7 @@ Ptr<Stitcher> createConfiguredStitcher(
     const StitchTuning &tuning,
     const int range_width_override = -1) {
     Ptr<Stitcher> stitcher = Stitcher::create(mode);
+    const bool use_gpu_path = tuning.try_gpu;
 
     stitcher->setPanoConfidenceThresh(tuning.pano_conf_thresh);
     stitcher->setWaveCorrection(false);
@@ -352,9 +374,10 @@ Ptr<Stitcher> createConfiguredStitcher(
 
     const int range_width = (range_width_override > 0) ? range_width_override : tuning.range_width;
     if (tuning.use_range_matcher && range_width > 1) {
-        stitcher->setFeaturesMatcher(makePtr<detail::BestOf2NearestRangeMatcher>(range_width, false, tuning.match_conf));
+        stitcher->setFeaturesMatcher(
+            makePtr<detail::BestOf2NearestRangeMatcher>(range_width, use_gpu_path, tuning.match_conf));
     } else {
-        stitcher->setFeaturesMatcher(makePtr<detail::BestOf2NearestMatcher>(false, tuning.match_conf));
+        stitcher->setFeaturesMatcher(makePtr<detail::BestOf2NearestMatcher>(use_gpu_path, tuning.match_conf));
     }
 
     if (tuning.use_affine_bundle) {
@@ -371,7 +394,7 @@ Ptr<Stitcher> createConfiguredStitcher(
         stitcher->setExposureCompensator(makePtr<detail::BlocksGainCompensator>());
     }
 
-    stitcher->setBlender(makePtr<detail::MultiBandBlender>(false, tuning.blend_bands));
+    stitcher->setBlender(makePtr<detail::MultiBandBlender>(use_gpu_path, tuning.blend_bands));
     return stitcher;
 }
 
@@ -411,21 +434,58 @@ optional<Mat> stitchSequentially(
     const Stitcher::Mode mode,
     const string &stage_name,
     const StitchTuning &tuning,
-    const int range_width_override = -1) {
+    const int range_width_override = -1,
+    const vector<string> *image_tags = nullptr) {
     if (images.empty()) {
         return nullopt;
     }
     Mat current = images.front().clone();
+    deque<Mat> anchors;
+    anchors.push_back(images.front());
+    const int anchor_window = std::max(1, tuning.anchor_window);
+
     for (size_t i = 1; i < images.size(); ++i) {
+        const string left_tag = imageTagAt(image_tags, i - 1);
+        const string right_tag = imageTagAt(image_tags, i);
+        cout << "[" << stage_name << "] sequential step " << i << "/" << (images.size() - 1)
+             << ": " << left_tag << " + " << right_tag << endl;
+
         Mat next_result;
-        const vector<Mat> pair = {current, images[i]};
-        const auto status = stitchWithMode(pair, next_result, mode, stage_name, tuning, range_width_override);
+        Stitcher::Status status = Stitcher::ERR_HOMOGRAPHY_EST_FAIL;
+
+        if (tuning.use_anchor_fallback && !anchors.empty()) {
+            vector<Mat> local_batch;
+            local_batch.reserve(2 + anchors.size());
+            local_batch.push_back(current);
+            for (const auto &anchor : anchors) {
+                local_batch.push_back(anchor);
+            }
+            local_batch.push_back(images[i]);
+
+            const int local_range = std::max(
+                2,
+                std::min(static_cast<int>(local_batch.size()), (range_width_override > 0) ? range_width_override : tuning.range_width));
+            status = stitchWithMode(local_batch, next_result, mode, stage_name, tuning, local_range);
+        }
+
         if (status != Stitcher::OK) {
+            const vector<Mat> pair = {current, images[i]};
+            status = stitchWithMode(pair, next_result, mode, stage_name, tuning, range_width_override);
+        }
+
+        if (status != Stitcher::OK) {
+            cout << "[" << stage_name << "] sequential step failed at "
+                 << left_tag << " + " << right_tag << endl;
             const auto diag = computePairDiagnostics(current, images[i], tuning.sift_features);
             logPairDiagnostics(current, images[i], stage_name, i, diag, tuning);
             return nullopt;
         }
         current = next_result;
+
+        anchors.push_back(images[i]);
+        while (static_cast<int>(anchors.size()) > anchor_window) {
+            anchors.pop_front();
+        }
     }
     return current;
 }
@@ -435,7 +495,8 @@ Mat stitchRobustly(
     const Stitcher::Mode mode,
     const string &stage_name,
     const StitchTuning &tuning,
-    const int range_width_override = -1) {
+    const int range_width_override = -1,
+    const vector<string> *image_tags = nullptr) {
     Mat output;
     const auto first_try_status = stitchWithMode(images, output, mode, stage_name, tuning, range_width_override);
     if (first_try_status == Stitcher::OK) {
@@ -444,7 +505,7 @@ Mat stitchRobustly(
 
     cout << "[" << stage_name << "] one-shot stitch failed, fallback to sequential: "
          << stitchStatusToString(first_try_status) << endl;
-    const auto sequential = stitchSequentially(images, mode, stage_name, tuning, range_width_override);
+    const auto sequential = stitchSequentially(images, mode, stage_name, tuning, range_width_override, image_tags);
     if (sequential.has_value()) {
         return sequential.value();
     }
@@ -457,15 +518,18 @@ Mat stitchRobustly(
 
 int main() {
     cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_SILENT);
-    cv::ocl::setUseOpenCL(false);
+    const StitchTuning tuning = loadStitchTuning();
+    const bool opencl_available = cv::ocl::haveOpenCL();
+    cv::ocl::setUseOpenCL(tuning.use_opencl && opencl_available);
+    const bool opencl_enabled = cv::ocl::useOpenCL();
     const auto temp_opencv = fs::temp_directory_path() / "opencv";
     fs::create_directories(temp_opencv);
     const string image_folder = "../images";
     const string image_type = "visible";
-    const string group = "desert_1";
+    const string group = "image_1";
     const string pos_path = "../assets/pos.mti";
 
-    const bool use_pos = envEnabled("STITCH_USE_POS", false);
+    const bool use_pos = envEnabled("STITCH_USE_POS", true);
 
     const string input_folder = image_folder + "/" + image_type + "/" + group;
     const string output_folder = "../output/" + image_type + "/" + group;
@@ -477,18 +541,26 @@ int main() {
     const fs::path strip_dir = output_dir / "strips";
     fs::create_directories(strip_dir);
 
-    const StitchTuning tuning = loadStitchTuning();
-
     try {
         cout << "[Main] input dir: " << input_folder << endl;
         cout << "[Main] POS: " << (use_pos ? "enabled" : "disabled") << endl;
         cout << "[Main] output: " << output_path << endl;
+        cout << "[Main] opencl: requested=" << (tuning.use_opencl ? "on" : "off")
+             << ", available=" << (opencl_available ? "yes" : "no")
+             << ", enabled=" << (opencl_enabled ? "yes" : "no")
+             << ", try_gpu=" << (tuning.try_gpu ? "on" : "off") << endl;
+        if (opencl_enabled) {
+            const cv::ocl::Device dev = cv::ocl::Device::getDefault();
+            cout << "[Main] opencl device: " << dev.vendorName() << " / " << dev.name() << endl;
+        }
         cout << "[Main] stitch params: sift=" << tuning.sift_features
              << ", match_conf=" << tuning.match_conf
              << ", range_matcher=" << (tuning.use_range_matcher ? "on" : "off")
              << ", range_width=" << tuning.range_width
              << ", affine_bundle=" << (tuning.use_affine_bundle ? "on" : "off")
-             << ", affine_warper=" << (tuning.use_affine_warper ? "on" : "off") << endl;
+             << ", affine_warper=" << (tuning.use_affine_warper ? "on" : "off")
+             << ", anchor_fallback=" << (tuning.use_anchor_fallback ? "on" : "off")
+             << ", anchor_window=" << tuning.anchor_window << endl;
 
         const auto [images, ids] = ImageLoader::loadWithIds(input_folder);
         cout << "[Main] valid images: " << images.size() << endl;
@@ -516,13 +588,28 @@ int main() {
                 continue;
             }
             cout << "[Strip " << i << "] intra-strip stitch, images=" << strip_groups[i].images.size() << endl;
+            vector<string> strip_image_tags;
+            strip_image_tags.reserve(strip_groups[i].images.size());
+            for (size_t j = 0; j < strip_groups[i].images.size(); ++j) {
+                if (j < strip_groups[i].records.size() && !strip_groups[i].records[j].file_id.empty()) {
+                    strip_image_tags.push_back(strip_groups[i].records[j].file_id);
+                } else {
+                    strip_image_tags.push_back("strip" + to_string(i) + "_img#" + to_string(j));
+                }
+            }
+            cout << "[Strip " << i << "] image order:";
+            for (const auto &tag : strip_image_tags) {
+                cout << " " << tag;
+            }
+            cout << endl;
 
             Mat strip_pano = stitchRobustly(
                 strip_groups[i].images,
                 Stitcher::SCANS,
                 "Strip " + to_string(i),
                 tuning,
-                tuning.range_width);
+                tuning.range_width,
+                &strip_image_tags);
             autoCropBlackBorder(strip_pano);
 
             const fs::path strip_output = strip_dir / ("strip_" + to_string(i) + ".jpg");
