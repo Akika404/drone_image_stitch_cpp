@@ -28,7 +28,23 @@ std::vector<FlightStripGroup> PosBasedImageGrouper::groupWithRecords(
         id_to_images[id].push_back(images[i]);
     }
 
-    const auto strips = groupByFlightStrips(pos_records);
+    auto strips = groupByFlightStrips(pos_records);
+
+    // Trim turning photos from each strip's edges.
+    for (size_t si = 0; si < strips.size(); si++) {
+        const size_t before = strips[si].size();
+        trimStripEdges(strips[si]);
+        const size_t after = strips[si].size();
+        if (before != after) {
+            std::cout << "[Group] strip " << si << ": trimmed "
+                      << (before - after) << " turning records ("
+                      << before << " -> " << after << ")" << std::endl;
+        }
+    }
+
+    // Remove strips that became too small after trimming.
+    std::erase_if(strips, [](const std::vector<PosRecord> &s) { return s.size() < 3; });
+
     std::vector<FlightStripGroup> groups;
     for (auto &strip: strips) {
         std::vector<PosRecord> sorted_records = strip;
@@ -73,6 +89,9 @@ auto PosBasedImageGrouper::groupByFlightStrips(
     int min_strip_records,
     double stability_threshold,
     int stability_count) -> std::vector<std::vector<PosRecord> > {
+    // -----------------------------------------------------------------------
+    // Step 1 — collect valid records
+    // -----------------------------------------------------------------------
     std::vector<PosRecord> valid_records;
     for (auto &r: records) {
         if (r.isValid()) valid_records.push_back(r);
@@ -84,13 +103,59 @@ auto PosBasedImageGrouper::groupByFlightStrips(
     std::cout << "[Group] valid POS records: " << valid_records.size()
             << "/" << records.size() << std::endl;
 
+    // -----------------------------------------------------------------------
+    // Step 2 — altitude filter: keep only records at survey altitude
+    //          (>= 90% of max altitude). This removes ground operations,
+    //          ascent, descent, and landing records.
+    // -----------------------------------------------------------------------
+    double max_alt = 0;
+    for (auto &r : valid_records) max_alt = std::max(max_alt, r.altitude);
+    const double alt_threshold = max_alt * 0.90;
+
+    std::vector<PosRecord> survey;
+    for (auto &r : valid_records) {
+        if (r.altitude >= alt_threshold) survey.push_back(r);
+    }
+    std::cout << "[Group] altitude filter: " << survey.size() << "/"
+              << valid_records.size() << " records (>= "
+              << alt_threshold << "m, max=" << max_alt << "m)" << std::endl;
+
+    if (survey.size() < static_cast<size_t>(min_strip_records)) {
+        std::cout << "[Group] too few survey-altitude records" << std::endl;
+        return {};
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 3 — replace POS heading with GPS-based flight bearing
+    //          The POS heading column is often the camera/gimbal yaw, NOT the
+    //          compass flight direction. Computing the bearing from consecutive
+    //          GPS coordinates gives the actual flight direction, which is much
+    //          more reliable for strip splitting.
+    // -----------------------------------------------------------------------
+    const double cos_lat = std::cos(survey[0].latitude * CV_PI / 180.0);
+    for (size_t i = 0; i + 1 < survey.size(); i++) {
+        const double dlat = survey[i + 1].latitude - survey[i].latitude;
+        const double dlon = (survey[i + 1].longitude - survey[i].longitude) * cos_lat;
+        const double dist = std::sqrt(dlat * dlat + dlon * dlon);
+        if (dist > 1e-9) {
+            survey[i].heading = std::atan2(dlon, dlat) * 180.0 / CV_PI;
+        }
+        // else: drone is hovering; keep previous heading
+    }
+    if (survey.size() > 1) {
+        survey.back().heading = survey[survey.size() - 2].heading;
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 4 — state machine: split into strips by heading changes
+    // -----------------------------------------------------------------------
     std::vector<std::vector<PosRecord> > strips;
     std::vector<PosRecord> current_strip_records;
     std::vector<PosRecord> stable_buffer;
     std::string state = "TURNING";
 
-    for (size_t i = 0; i < valid_records.size(); ++i) {
-        const auto &current_record = valid_records[i];
+    for (size_t i = 0; i < survey.size(); ++i) {
+        const auto &current_record = survey[i];
         if (state == "COLLECTING") {
             if (!current_strip_records.empty()) {
                 std::vector<PosRecord> recent;
@@ -102,7 +167,7 @@ auto PosBasedImageGrouper::groupByFlightStrips(
                               current_strip_records.end());
                 double avg_heading = stripAverageHeading(recent);
                 double diff_from_avg = headingDifference(current_record.heading, avg_heading);
-                const PosRecord *prev_record = i > 0 ? &valid_records[i - 1] : nullptr;
+                const PosRecord *prev_record = i > 0 ? &survey[i - 1] : nullptr;
                 double diff_from_prev = prev_record
                                             ? headingDifference(current_record.heading, prev_record->heading)
                                             : 0.0;
@@ -160,6 +225,52 @@ auto PosBasedImageGrouper::groupByFlightStrips(
                static_cast<int>(stable_buffer.size()) >= min_strip_records) {
         strips.push_back(stable_buffer);
     }
+
+    std::cout << "[Group] state machine found " << strips.size()
+              << " candidate strips" << std::endl;
+    for (size_t i = 0; i < strips.size(); i++) {
+        const double axis = computeFlightAxis(strips[i]);
+        std::cout << "[Group]   candidate " << i << ": " << strips[i].size()
+                  << " records, flight-axis=" << axis << "deg" << std::endl;
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 5 — flight axis alignment filter
+    //          In a boustrophedon ("几") survey all strips share the same
+    //          flight axis (just in opposite directions: N↔S or E↔W).
+    //          Remove any strip whose axis doesn't align with the dominant
+    //          survey axis (e.g. transit to/from the survey area, return).
+    //          Only apply when there are > 2 candidates so we have a reliable
+    //          majority to compute the axis from.
+    // -----------------------------------------------------------------------
+    if (strips.size() > 2) {
+        const double survey_axis = computeFlightAxis(strips);
+        std::cout << "[Group] dominant survey axis: " << survey_axis
+                  << "deg" << std::endl;
+
+        constexpr double axis_tolerance = 20.0;
+        std::vector<std::vector<PosRecord>> aligned;
+        for (size_t si = 0; si < strips.size(); si++) {
+            const double strip_axis = computeFlightAxis(strips[si]);
+            double diff = std::abs(strip_axis - survey_axis);
+            if (diff > 90.0) diff = 180.0 - diff;
+
+            if (diff <= axis_tolerance) {
+                aligned.push_back(strips[si]);
+                std::cout << "[Group]   keep strip " << si << " ("
+                          << strips[si].size() << " records, axis="
+                          << strip_axis << "deg)" << std::endl;
+            } else {
+                std::cout << "[Group]   remove strip " << si << " ("
+                          << strips[si].size() << " records, axis="
+                          << strip_axis << "deg, diff=" << diff
+                          << "deg from survey axis)" << std::endl;
+            }
+        }
+        strips = aligned;
+    }
+
+    std::cout << "[Group] final strip count: " << strips.size() << std::endl;
     return strips;
 }
 
@@ -207,4 +318,77 @@ double PosBasedImageGrouper::stripAverageHeading(const std::vector<PosRecord> &r
     headings.reserve(records.size());
     for (auto &r: records) headings.push_back(r.heading);
     return averageHeading(headings);
+}
+
+double PosBasedImageGrouper::computeFlightAxis(const std::vector<PosRecord> &records) {
+    if (records.empty()) return 0.0;
+    double sin2_sum = 0.0, cos2_sum = 0.0;
+    for (auto &r : records) {
+        const double rad = r.heading * CV_PI / 180.0;
+        sin2_sum += std::sin(2.0 * rad);
+        cos2_sum += std::cos(2.0 * rad);
+    }
+    double axis = 0.5 * std::atan2(sin2_sum, cos2_sum) * 180.0 / CV_PI;
+    if (axis < 0) axis += 180.0;
+    return axis;
+}
+
+double PosBasedImageGrouper::computeFlightAxis(
+    const std::vector<std::vector<PosRecord>> &strips) {
+    if (strips.empty()) return 0.0;
+    double sin2_sum = 0.0, cos2_sum = 0.0;
+    for (auto &s : strips) {
+        for (auto &r : s) {
+            const double rad = r.heading * CV_PI / 180.0;
+            sin2_sum += std::sin(2.0 * rad);
+            cos2_sum += std::cos(2.0 * rad);
+        }
+    }
+    double axis = 0.5 * std::atan2(sin2_sum, cos2_sum) * 180.0 / CV_PI;
+    if (axis < 0) axis += 180.0;
+    return axis;
+}
+
+double PosBasedImageGrouper::computeCoreHeading(const std::vector<PosRecord> &records) {
+    if (records.empty()) return 0.0;
+    // Use the middle 50% of records — these are guaranteed to be straight-line
+    // flight, uncontaminated by turning photos at the edges.
+    const size_t n = records.size();
+    const size_t start = n / 4;
+    size_t end = start + n / 2;
+    if (end > n) end = n;
+    if (end <= start) return stripAverageHeading(records);
+
+    std::vector<double> mid_headings;
+    mid_headings.reserve(end - start);
+    for (size_t i = start; i < end; i++) {
+        mid_headings.push_back(records[i].heading);
+    }
+    return averageHeading(mid_headings);
+}
+
+void PosBasedImageGrouper::trimStripEdges(
+    std::vector<PosRecord> &records,
+    const double trim_threshold) {
+    if (records.size() < 6) return;  // too short to trim safely
+
+    const double core = computeCoreHeading(records);
+
+    // Trim from front: remove records deviating from core heading.
+    while (records.size() > 3) {
+        if (headingDifference(records.front().heading, core) > trim_threshold) {
+            records.erase(records.begin());
+        } else {
+            break;
+        }
+    }
+
+    // Trim from back.
+    while (records.size() > 3) {
+        if (headingDifference(records.back().heading, core) > trim_threshold) {
+            records.pop_back();
+        } else {
+            break;
+        }
+    }
 }
