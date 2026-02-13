@@ -1,6 +1,7 @@
 #include "pos_record.hpp"
 
 #include <cmath>
+#include <iostream>
 
 int PosRecord::timeSeconds() const {
     if (time_str.size() == 6) {
@@ -12,11 +13,20 @@ int PosRecord::timeSeconds() const {
     return 0;
 }
 
+// 飞行高度限制，低于这个高度的数据将会被舍弃
+constexpr int flt_height_limit = 50;
+
 bool PosRecord::isValid() const {
+    // 这里是为了防止出现缺一列的情况，时间未初始化的情况下，第一列会被读为经纬度
+    // 经纬度一定是带有小数点的，所以用“是否包含‘.’”来判断
+    if (time_str.find('.') != std::string::npos) {
+        return false;
+    }
     if (std::abs(longitude) < 1.0 || std::abs(latitude) < 1.0) {
         return false;
     }
-    if (altitude < 50.0) {
+    // 这个是飞行高度
+    if (altitude < flt_height_limit) {
         return false;
     }
     return true;

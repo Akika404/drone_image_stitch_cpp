@@ -19,10 +19,10 @@ public:
         const std::vector<std::string> &image_ids,
         const std::vector<PosRecord> &pos_records);
 
-    [[nodiscard]] std::vector<std::vector<cv::Mat> > group(
+    [[nodiscard]] static std::vector<std::vector<cv::Mat> > group(
         const std::vector<cv::Mat> &images,
         const std::vector<std::string> &image_ids,
-        const std::vector<PosRecord> &pos_records) const;
+        const std::vector<PosRecord> &pos_records);
 
 private:
     static std::vector<std::vector<PosRecord> > groupByFlightStrips(
@@ -63,5 +63,5 @@ private:
 
     /// Overload: compute the dominant flight axis over multiple strips.
     static double computeFlightAxis(
-        const std::vector<std::vector<PosRecord>> &strips);
+        const std::vector<std::vector<PosRecord> > &strips);
 };

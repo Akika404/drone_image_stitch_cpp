@@ -39,7 +39,7 @@ std::vector<PosRecord> PosReader::load(const std::string &pos_path) {
             record.latitude = std::stod(parts[2]);
             record.altitude = std::stod(parts[3]);
             record.omega = std::stod(parts[4]);
-            record.phi   = std::stod(parts[5]);
+            record.phi = std::stod(parts[5]);
             record.kappa = std::stod(parts[6]);
             record.file_id = parts[7];
             records.push_back(record);

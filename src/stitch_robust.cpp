@@ -277,7 +277,7 @@ namespace {
         }
         cv::Mat current = images.front().clone();
         std::deque<cv::Mat> anchors;
-        anchors.push_back(images.front());
+        anchors.emplace_back(images.front());
         const int anchor_window = std::max(1, tuning.anchor_window);
 
         for (size_t i = 1; i < images.size(); ++i) {
@@ -307,7 +307,7 @@ namespace {
             }
 
             if (status != cv::Stitcher::OK) {
-                const std::vector<cv::Mat> pair = {current, images[i]};
+                const std::vector pair = {current, images[i]};
                 status = stitchWithMode(pair, next_result, mode, stage_name, tuning, range_width_override);
             }
 

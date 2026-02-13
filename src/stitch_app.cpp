@@ -65,7 +65,7 @@ int runStitchApplication() {
 
     const std::string image_folder = "../images";
     const std::string image_type = "visible";
-    const std::string group = "full";
+    const std::string group = "image_1";
     const std::string pos_path = "../assets/pos.mti";
 
     const bool use_pos = envEnabled("STITCH_USE_POS", true);

@@ -37,8 +37,8 @@ std::vector<FlightStripGroup> PosBasedImageGrouper::groupWithRecords(
         const size_t after = strips[si].size();
         if (before != after) {
             std::cout << "[Group] strip " << si << ": trimmed "
-                      << (before - after) << " turning records ("
-                      << before << " -> " << after << ")" << std::endl;
+                    << (before - after) << " turning records ("
+                    << before << " -> " << after << ")" << std::endl;
         }
     }
 
@@ -73,7 +73,7 @@ std::vector<FlightStripGroup> PosBasedImageGrouper::groupWithRecords(
 std::vector<std::vector<cv::Mat> > PosBasedImageGrouper::group(
     const std::vector<cv::Mat> &images,
     const std::vector<std::string> &image_ids,
-    const std::vector<PosRecord> &pos_records) const {
+    const std::vector<PosRecord> &pos_records) {
     const auto groups_with_records = groupWithRecords(images, image_ids, pos_records);
     std::vector<std::vector<cv::Mat> > groups;
     groups.reserve(groups_with_records.size());
@@ -109,16 +109,16 @@ auto PosBasedImageGrouper::groupByFlightStrips(
     //          ascent, descent, and landing records.
     // -----------------------------------------------------------------------
     double max_alt = 0;
-    for (auto &r : valid_records) max_alt = std::max(max_alt, r.altitude);
+    for (auto &r: valid_records) max_alt = std::max(max_alt, r.altitude);
     const double alt_threshold = max_alt * 0.90;
 
     std::vector<PosRecord> survey;
-    for (auto &r : valid_records) {
+    for (auto &r: valid_records) {
         if (r.altitude >= alt_threshold) survey.push_back(r);
     }
     std::cout << "[Group] altitude filter: " << survey.size() << "/"
-              << valid_records.size() << " records (>= "
-              << alt_threshold << "m, max=" << max_alt << "m)" << std::endl;
+            << valid_records.size() << " records (>= "
+            << alt_threshold << "m, max=" << max_alt << "m)" << std::endl;
 
     if (survey.size() < static_cast<size_t>(min_strip_records)) {
         std::cout << "[Group] too few survey-altitude records" << std::endl;
@@ -227,11 +227,11 @@ auto PosBasedImageGrouper::groupByFlightStrips(
     }
 
     std::cout << "[Group] state machine found " << strips.size()
-              << " candidate strips" << std::endl;
+            << " candidate strips" << std::endl;
     for (size_t i = 0; i < strips.size(); i++) {
         const double axis = computeFlightAxis(strips[i]);
         std::cout << "[Group]   candidate " << i << ": " << strips[i].size()
-                  << " records, flight-axis=" << axis << "deg" << std::endl;
+                << " records, flight-axis=" << axis << "deg" << std::endl;
     }
 
     // -----------------------------------------------------------------------
@@ -246,10 +246,10 @@ auto PosBasedImageGrouper::groupByFlightStrips(
     if (strips.size() > 2) {
         const double survey_axis = computeFlightAxis(strips);
         std::cout << "[Group] dominant survey axis: " << survey_axis
-                  << "deg" << std::endl;
+                << "deg" << std::endl;
 
         constexpr double axis_tolerance = 20.0;
-        std::vector<std::vector<PosRecord>> aligned;
+        std::vector<std::vector<PosRecord> > aligned;
         for (size_t si = 0; si < strips.size(); si++) {
             const double strip_axis = computeFlightAxis(strips[si]);
             double diff = std::abs(strip_axis - survey_axis);
@@ -258,13 +258,13 @@ auto PosBasedImageGrouper::groupByFlightStrips(
             if (diff <= axis_tolerance) {
                 aligned.push_back(strips[si]);
                 std::cout << "[Group]   keep strip " << si << " ("
-                          << strips[si].size() << " records, axis="
-                          << strip_axis << "deg)" << std::endl;
+                        << strips[si].size() << " records, axis="
+                        << strip_axis << "deg)" << std::endl;
             } else {
                 std::cout << "[Group]   remove strip " << si << " ("
-                          << strips[si].size() << " records, axis="
-                          << strip_axis << "deg, diff=" << diff
-                          << "deg from survey axis)" << std::endl;
+                        << strips[si].size() << " records, axis="
+                        << strip_axis << "deg, diff=" << diff
+                        << "deg from survey axis)" << std::endl;
             }
         }
         strips = aligned;
@@ -323,7 +323,7 @@ double PosBasedImageGrouper::stripAverageBearing(const std::vector<PosRecord> &r
 double PosBasedImageGrouper::computeFlightAxis(const std::vector<PosRecord> &records) {
     if (records.empty()) return 0.0;
     double sin2_sum = 0.0, cos2_sum = 0.0;
-    for (auto &r : records) {
+    for (auto &r: records) {
         const double rad = r.bearing * CV_PI / 180.0;
         sin2_sum += std::sin(2.0 * rad);
         cos2_sum += std::cos(2.0 * rad);
@@ -334,11 +334,11 @@ double PosBasedImageGrouper::computeFlightAxis(const std::vector<PosRecord> &rec
 }
 
 double PosBasedImageGrouper::computeFlightAxis(
-    const std::vector<std::vector<PosRecord>> &strips) {
+    const std::vector<std::vector<PosRecord> > &strips) {
     if (strips.empty()) return 0.0;
     double sin2_sum = 0.0, cos2_sum = 0.0;
-    for (auto &s : strips) {
-        for (auto &r : s) {
+    for (auto &s: strips) {
+        for (auto &r: s) {
             const double rad = r.bearing * CV_PI / 180.0;
             sin2_sum += std::sin(2.0 * rad);
             cos2_sum += std::cos(2.0 * rad);
@@ -370,7 +370,7 @@ double PosBasedImageGrouper::computeCoreBearing(const std::vector<PosRecord> &re
 void PosBasedImageGrouper::trimStripEdges(
     std::vector<PosRecord> &records,
     const double trim_threshold) {
-    if (records.size() < 6) return;  // too short to trim safely
+    if (records.size() < 6) return; // too short to trim safely
 
     const double core = computeCoreBearing(records);
 
