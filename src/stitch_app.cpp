@@ -3,8 +3,11 @@
 #include <opencv2/core/ocl.hpp>
 #include <opencv2/opencv.hpp>
 
+#include <algorithm>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -55,6 +58,33 @@ namespace {
                 }
             }
         }
+    }
+
+    std::vector<std::string> makeStripTags(const FlightStripGroup &group) {
+        std::vector<std::string> tags;
+        tags.reserve(group.images.size());
+        for (size_t i = 0; i < group.images.size(); ++i) {
+            if (i < group.records.size() && !group.records[i].file_id.empty()) {
+                tags.push_back(group.records[i].file_id);
+            } else {
+                tags.push_back("img#" + std::to_string(i));
+            }
+        }
+        return tags;
+    }
+
+    cv::UMat makeAdjacentStripMask(const int n, const int neighbor_width) {
+        cv::Mat mask(n, n, CV_8U, cv::Scalar(0));
+        for (int i = 0; i < n; ++i) {
+            for (int j = std::max(0, i - neighbor_width); j <= std::min(n - 1, i + neighbor_width); ++j) {
+                if (i != j) {
+                    mask.at<uchar>(i, j) = 1;
+                }
+            }
+        }
+        cv::UMat umask;
+        mask.copyTo(umask);
+        return umask;
     }
 } // namespace
 
@@ -110,28 +140,57 @@ int runStitchApplication() {
                 std::cout << "[Main]   strip " << i << ": " << strip_groups[i].images.size() << " images" << std::endl;
             }
 
-            const auto input = buildGlobalStitchInput(strip_groups, tuning);
-            std::cout << "[Main] global pipeline: total_images=" << input.images.size()
-                    << ", within_strip_pairs=" << input.num_within_pairs
-                    << ", cross_strip_pairs=" << input.num_cross_pairs << std::endl;
+            std::vector<cv::Mat> strip_panoramas;
+            strip_panoramas.reserve(strip_groups.size());
+            fs::path strips_dir = output_path.parent_path() / "strips";
+            fs::create_directories(strips_dir);
+
+            StitchTuning strip_tuning = tuning;
+            for (size_t si = 0; si < strip_groups.size(); ++si) {
+                std::cout << "[Main] strip-stage: stitching strip " << si
+                        << " (" << strip_groups[si].images.size() << " images)..." << std::endl;
+                auto strip_tags = makeStripTags(strip_groups[si]);
+                cv::Mat strip_pano = stitchRobustly(
+                    strip_groups[si].images,
+                    cv::Stitcher::SCANS,
+                    "Strip" + std::to_string(si),
+                    strip_tuning,
+                    strip_tuning.range_width,
+                    &strip_tags);
+                autoCropBlackBorder(strip_pano);
+
+                std::ostringstream strip_name;
+                strip_name << "strip_" << std::setw(2) << std::setfill('0') << si << ".jpg";
+                cv::imwrite((strips_dir / strip_name.str()).string(), strip_pano);
+                std::cout << "[Main] strip-stage: strip " << si << " panorama="
+                        << strip_pano.cols << "x" << strip_pano.rows << std::endl;
+                strip_panoramas.push_back(std::move(strip_pano));
+            }
+
+            if (strip_panoramas.size() < 2) {
+                throw std::runtime_error("need at least 2 strip panoramas for multi-strip compose");
+            }
 
             StitchTuning global_tuning = tuning;
-            // Multi-band blending at full compose resolution is expensive for multi-strip panoramas.
-            if (global_tuning.compositing_resol_mpx < 0.0) {
-                global_tuning.compositing_resol_mpx = 2.0;
-            }
+            global_tuning.use_range_matcher = false;
+            global_tuning.range_width = 2;
+            // if (global_tuning.compositing_resol_mpx < 0.0) {
+            //     global_tuning.compositing_resol_mpx = 2.0;
+            // }
             global_tuning.blend_bands = std::min(global_tuning.blend_bands, 3);
-            std::cout << "[Main] global speed tuning: compose_mpx=" << global_tuning.compositing_resol_mpx
+            std::cout << "[Main] global-stage: strip_panoramas=" << strip_panoramas.size()
+                    << ", compose_mpx=" << global_tuning.compositing_resol_mpx
                     << ", blend_bands=" << global_tuning.blend_bands << std::endl;
 
+            cv::UMat strip_mask = makeAdjacentStripMask(static_cast<int>(strip_panoramas.size()), 1);
             panorama = stitchRobustly(
-                input.images,
+                strip_panoramas,
                 cv::Stitcher::SCANS,
                 "Global",
                 global_tuning,
                 global_tuning.range_width,
                 nullptr,
-                &input.match_mask);
+                &strip_mask);
         } else {
             std::vector<cv::Mat> all_images;
             std::vector<std::string> all_tags;
