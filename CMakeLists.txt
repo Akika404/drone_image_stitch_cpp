@@ -8,6 +8,7 @@ if(MSVC)
     add_compile_options(/utf-8)
 endif()
 
+# like this: "C:/Users/StarFall/opencv/build"
 set(OPENCV_BUILD_PATH "你的opencv build路径")
 
 # OpenCV 安装路径 (可通过 -DOpenCV_DIR=... 覆盖，FORCE 确保 CLion 等 IDE 能正确使用)
