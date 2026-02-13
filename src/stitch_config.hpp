@@ -30,6 +30,4 @@ struct StitchTuning {
     int large_strip_range_width = 4;
 };
 
-bool envEnabled(const char *name, bool default_value = false);
-
 StitchTuning loadStitchTuning();

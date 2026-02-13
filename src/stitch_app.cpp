@@ -68,7 +68,7 @@ int runStitchApplication() {
     const std::string group = "image_1";
     const std::string pos_path = "../assets/pos.mti";
 
-    const bool use_pos = envEnabled("STITCH_USE_POS", true);
+    const bool use_pos = true;
     const std::string input_folder = image_folder + "/" + image_type + "/" + group;
     const std::string output_folder = "../output/" + image_type + "/" + group;
     fs::create_directories(output_folder);
