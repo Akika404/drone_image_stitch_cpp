@@ -610,6 +610,389 @@ Mat stitchRobustly(
         "[" + stage_name + "] stitch failed: " + stitchStatusToString(first_try_status) +
         " (code: " + to_string(first_try_status) + ")");
 }
+// ---------------------------------------------------------------------------
+// Global pipeline helpers: order strips, build spatial adjacency mask, and
+// run the full OpenCV detail-level stitching on ALL original images at once.
+// This avoids the unreliable "stitch strip panoramas then re-stitch" step.
+// ---------------------------------------------------------------------------
+
+void orderStripGroupsByCrossTrack(vector<FlightStripGroup> &groups) {
+    if (groups.size() < 2) {
+        return;
+    }
+    vector<PosRecord> all_records;
+    for (const auto &g : groups) {
+        all_records.insert(all_records.end(), g.records.begin(), g.records.end());
+    }
+    const double axis_deg = averageFlightAxisHeading(all_records);
+    const double axis_rad = degreeToRadian(axis_deg);
+    const auto [base_lon, base_lat] = stripCentroidLonLat(groups.front().records);
+    const double lat_rad = degreeToRadian(base_lat);
+    constexpr double m_per_lat = 110540.0;
+    const double m_per_lon = 111320.0 * std::cos(lat_rad);
+    const double cross_e = -std::cos(axis_rad);
+    const double cross_n = std::sin(axis_rad);
+
+    vector<pair<double, int>> order;
+    for (int i = 0; i < static_cast<int>(groups.size()); i++) {
+        const auto [lon, lat] = stripCentroidLonLat(groups[i].records);
+        const double e = (lon - base_lon) * m_per_lon;
+        const double n = (lat - base_lat) * m_per_lat;
+        order.push_back({e * cross_e + n * cross_n, i});
+    }
+    ranges::sort(order);
+    vector<FlightStripGroup> sorted;
+    sorted.reserve(groups.size());
+    for (auto &[ct, idx] : order) {
+        sorted.push_back(std::move(groups[idx]));
+    }
+    groups = std::move(sorted);
+}
+
+struct GlobalStitchInput {
+    vector<Mat> images;
+    UMat match_mask;
+    int num_within_pairs = 0;
+    int num_cross_pairs = 0;
+};
+
+GlobalStitchInput buildGlobalStitchInput(
+    const vector<FlightStripGroup> &strip_groups,
+    const StitchTuning &tuning) {
+    // GPS base point for local coordinate conversion.
+    double base_lat = 0.0;
+    double base_lon = 0.0;
+    for (const auto &g : strip_groups) {
+        if (!g.records.empty()) {
+            base_lat = g.records[0].latitude;
+            base_lon = g.records[0].longitude;
+            break;
+        }
+    }
+    const double lat_rad = degreeToRadian(base_lat);
+    constexpr double m_per_lat = 110540.0;
+    const double m_per_lon = 111320.0 * std::cos(lat_rad);
+
+    struct ImgMeta {
+        int flat;
+        int strip;
+        int pos;
+        double x;
+        double y;
+    };
+    vector<ImgMeta> meta;
+    vector<Mat> all_images;
+
+    for (int s = 0; s < static_cast<int>(strip_groups.size()); s++) {
+        for (int j = 0; j < static_cast<int>(strip_groups[s].images.size()); j++) {
+            ImgMeta m{};
+            m.flat = static_cast<int>(all_images.size());
+            m.strip = s;
+            m.pos = j;
+            if (j < static_cast<int>(strip_groups[s].records.size())) {
+                m.x = (strip_groups[s].records[j].longitude - base_lon) * m_per_lon;
+                m.y = (strip_groups[s].records[j].latitude - base_lat) * m_per_lat;
+            }
+            meta.push_back(m);
+            all_images.push_back(strip_groups[s].images[j]);
+        }
+    }
+
+    const int n = static_cast<int>(all_images.size());
+    Mat mask(n, n, CV_8U, Scalar(0));
+    int within_pairs = 0;
+    int cross_pairs = 0;
+
+    // Within-strip: sequential range neighbours (same as the proven intra-strip matcher).
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (meta[i].strip == meta[j].strip &&
+                std::abs(meta[i].pos - meta[j].pos) <= tuning.range_width) {
+                mask.at<uchar>(i, j) = 1;
+                mask.at<uchar>(j, i) = 1;
+                within_pairs++;
+            }
+        }
+    }
+
+    // Cross-strip: for each image, find nearest K images in each adjacent strip
+    // (up to 2 strips away, to handle narrow overlap zones).
+    constexpr int cross_k = 4;
+    const int num_strips = static_cast<int>(strip_groups.size());
+    for (int s1 = 0; s1 < num_strips; s1++) {
+        for (int s2 = s1 + 1; s2 <= std::min(s1 + 2, num_strips - 1); s2++) {
+            for (const auto &m1 : meta) {
+                if (m1.strip != s1) {
+                    continue;
+                }
+                vector<pair<double, int>> dists;
+                for (const auto &m2 : meta) {
+                    if (m2.strip != s2) {
+                        continue;
+                    }
+                    const double dx = m1.x - m2.x;
+                    const double dy = m1.y - m2.y;
+                    dists.push_back({dx * dx + dy * dy, m2.flat});
+                }
+                ranges::sort(dists);
+                const int k = std::min(cross_k, static_cast<int>(dists.size()));
+                for (int ki = 0; ki < k; ki++) {
+                    const int j = dists[ki].second;
+                    if (!mask.at<uchar>(m1.flat, j)) {
+                        mask.at<uchar>(m1.flat, j) = 1;
+                        mask.at<uchar>(j, m1.flat) = 1;
+                        cross_pairs++;
+                    }
+                }
+            }
+        }
+    }
+
+    GlobalStitchInput result;
+    result.images = std::move(all_images);
+    mask.copyTo(result.match_mask);
+    result.num_within_pairs = within_pairs;
+    result.num_cross_pairs = cross_pairs;
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Full detail-level stitching pipeline.
+//
+// Instead of relying on the high-level cv::Stitcher (which doesn't support a
+// pairwise matching mask), this function drives each sub-step directly:
+//   feature detection → masked matching → camera estimation → bundle adjust →
+//   warp → exposure compensation → seam finding → multi-band blending.
+// ---------------------------------------------------------------------------
+Mat stitchGlobalPipeline(
+    const vector<Mat> &images,
+    const UMat &match_mask,
+    const StitchTuning &tuning) {
+    const string stage = "Global";
+    const int N = static_cast<int>(images.size());
+    if (N < 2) {
+        throw runtime_error("[" + stage + "] need >= 2 images");
+    }
+
+    // --- Resolution scales (same semantics as cv::Stitcher) ---
+    const double full_area = static_cast<double>(images[0].size().area());
+    const double work_scale = min(1.0, sqrt(tuning.registration_resol_mpx * 1e6 / full_area));
+    const double seam_scale = min(1.0, sqrt(tuning.seam_estimation_resol_mpx * 1e6 / full_area));
+    const double compose_scale = (tuning.compositing_resol_mpx > 0)
+        ? min(1.0, sqrt(tuning.compositing_resol_mpx * 1e6 / full_area))
+        : 1.0;
+    const double seam_work_aspect = seam_scale / work_scale;
+    const double compose_work_aspect = compose_scale / work_scale;
+    cout << "[" << stage << "] scale: work=" << work_scale
+         << " seam=" << seam_scale << " compose=" << compose_scale << endl;
+
+    // === 1. Feature detection ===
+    cout << "[" << stage << "] detecting features (" << N << " images)..." << endl;
+    Ptr<Feature2D> finder = SIFT::create(tuning.sift_features);
+    vector<detail::ImageFeatures> features(N);
+    vector<Size> full_sizes(N);
+    for (int i = 0; i < N; i++) {
+        full_sizes[i] = images[i].size();
+        Mat work_img;
+        resize(images[i], work_img, Size(), work_scale, work_scale, INTER_LINEAR_EXACT);
+        detail::computeImageFeatures(finder, work_img, features[i]);
+        features[i].img_idx = i;
+        if ((i + 1) % 20 == 0 || i == N - 1) {
+            cout << "[" << stage << "]   features: " << (i + 1) << "/" << N << endl;
+        }
+    }
+
+    // === 2. Feature matching with spatial adjacency mask ===
+    cout << "[" << stage << "] matching features (masked)..." << endl;
+    Ptr<detail::FeaturesMatcher> matcher =
+        makePtr<detail::BestOf2NearestMatcher>(tuning.try_gpu, tuning.match_conf);
+    vector<detail::MatchesInfo> pairwise_matches;
+    (*matcher)(features, pairwise_matches, match_mask);
+    matcher->collectGarbage();
+
+    // === 3. Keep only the largest connected component ===
+    vector<int> indices = detail::leaveBiggestComponent(
+        features, pairwise_matches, tuning.pano_conf_thresh);
+    const int num = static_cast<int>(indices.size());
+    cout << "[" << stage << "] connected component: " << num << "/" << N << " images" << endl;
+    if (num < 2) {
+        throw runtime_error("[" + stage + "] only " + to_string(num) + " connected images");
+    }
+
+    vector<Mat> imgs(num);
+    vector<Size> sizes_full(num);
+    for (int i = 0; i < num; i++) {
+        imgs[i] = images[indices[i]];
+        sizes_full[i] = full_sizes[indices[i]];
+    }
+
+    // === 4. Camera estimation (affine model for planar drone images) ===
+    cout << "[" << stage << "] camera estimation (affine)..." << endl;
+    vector<detail::CameraParams> cameras;
+    if (!detail::AffineBasedEstimator()(features, pairwise_matches, cameras)) {
+        throw runtime_error("[" + stage + "] camera estimation failed");
+    }
+    for (auto &c : cameras) {
+        c.R.convertTo(c.R, CV_32F);
+    }
+
+    // === 5. Bundle adjustment ===
+    cout << "[" << stage << "] bundle adjustment..." << endl;
+    {
+        auto ba = makePtr<detail::BundleAdjusterAffinePartial>();
+        ba->setConfThresh(tuning.pano_conf_thresh);
+        if (!(*ba)(features, pairwise_matches, cameras)) {
+            cerr << "[" << stage << "] WARNING: bundle adjustment did not converge, "
+                 << "using initial camera estimates" << endl;
+        }
+    }
+
+    // Median focal length → warper scale.
+    vector<double> focals;
+    focals.reserve(cameras.size());
+    for (const auto &c : cameras) {
+        focals.push_back(c.focal);
+    }
+    ranges::sort(focals);
+    const float warped_scale = static_cast<float>(focals[focals.size() / 2]);
+
+    // === 6. Warp every image at seam resolution ===
+    cout << "[" << stage << "] warping at seam resolution (" << num << " images)..." << endl;
+    Ptr<WarperCreator> wc = tuning.use_affine_warper
+        ? static_cast<Ptr<WarperCreator>>(makePtr<AffineWarper>())
+        : static_cast<Ptr<WarperCreator>>(makePtr<cv::PlaneWarper>());
+    auto seam_warper = wc->create(warped_scale * static_cast<float>(seam_work_aspect));
+
+    vector<UMat> imgs_seam(num);
+    vector<UMat> masks_seam(num);
+    vector<Point> corners_seam(num);
+    vector<Size> sizes_seam(num);
+
+    for (int i = 0; i < num; i++) {
+        Mat sm;
+        resize(imgs[i], sm, Size(), seam_scale, seam_scale, INTER_LINEAR_EXACT);
+        Mat_<float> K;
+        cameras[i].K().convertTo(K, CV_32F);
+        const auto swa = static_cast<float>(seam_work_aspect);
+        K(0, 0) *= swa;
+        K(0, 2) *= swa;
+        K(1, 1) *= swa;
+        K(1, 2) *= swa;
+        corners_seam[i] = seam_warper->warp(
+            sm, K, cameras[i].R, INTER_LINEAR, BORDER_REFLECT, imgs_seam[i]);
+        sizes_seam[i] = imgs_seam[i].size();
+        Mat m(sm.size(), CV_8U, Scalar(255));
+        seam_warper->warp(m, K, cameras[i].R, INTER_NEAREST, BORDER_CONSTANT, masks_seam[i]);
+    }
+
+    // === 7. Exposure compensation ===
+    cout << "[" << stage << "] exposure compensation..." << endl;
+    Ptr<detail::ExposureCompensator> comp = tuning.use_blocks_gain
+        ? detail::ExposureCompensator::createDefault(detail::ExposureCompensator::GAIN_BLOCKS)
+        : detail::ExposureCompensator::createDefault(detail::ExposureCompensator::GAIN);
+    comp->feed(corners_seam, imgs_seam, masks_seam);
+
+    // === 8. Seam finding ===
+    cout << "[" << stage << "] seam finding..." << endl;
+    {
+        vector<UMat> imgs_f(num);
+        for (int i = 0; i < num; i++) {
+            imgs_seam[i].convertTo(imgs_f[i], CV_32F);
+        }
+        auto sf = makePtr<detail::DpSeamFinder>(detail::DpSeamFinder::COLOR_GRAD);
+        sf->find(imgs_f, corners_seam, masks_seam);
+    }
+    imgs_seam.clear(); // free seam-resolution images
+
+    // === 9. Compose at full resolution ===
+    cout << "[" << stage << "] compositing at full resolution (" << num << " images)..." << endl;
+    auto comp_warper = wc->create(warped_scale * static_cast<float>(compose_work_aspect));
+
+    // First pass: compute output ROI for each image → prepare blender.
+    vector<Point> corners_c(num);
+    vector<Size> sizes_c(num);
+    for (int i = 0; i < num; i++) {
+        Mat_<float> K;
+        cameras[i].K().convertTo(K, CV_32F);
+        const auto cwa = static_cast<float>(compose_work_aspect);
+        K(0, 0) *= cwa;
+        K(0, 2) *= cwa;
+        K(1, 1) *= cwa;
+        K(1, 2) *= cwa;
+        Size sz = sizes_full[i];
+        if (abs(compose_scale - 1.0) > 0.1) {
+            sz.width = cvRound(sz.width * compose_scale);
+            sz.height = cvRound(sz.height * compose_scale);
+        }
+        const Rect roi = comp_warper->warpRoi(sz, K, cameras[i].R);
+        corners_c[i] = roi.tl();
+        sizes_c[i] = roi.size();
+    }
+
+    Ptr<detail::Blender> blender = makePtr<detail::MultiBandBlender>(tuning.try_gpu, tuning.blend_bands);
+    blender->prepare(corners_c, sizes_c);
+
+    // Second pass: warp each image at full resolution and feed to the blender.
+    for (int i = 0; i < num; i++) {
+        Mat ci;
+        if (abs(compose_scale - 1.0) > 0.1) {
+            resize(imgs[i], ci, Size(), compose_scale, compose_scale, INTER_LINEAR_EXACT);
+        } else {
+            ci = imgs[i];
+        }
+
+        Mat_<float> K;
+        cameras[i].K().convertTo(K, CV_32F);
+        const auto cwa = static_cast<float>(compose_work_aspect);
+        K(0, 0) *= cwa;
+        K(0, 2) *= cwa;
+        K(1, 1) *= cwa;
+        K(1, 2) *= cwa;
+
+        // Warp image.
+        UMat iw;
+        comp_warper->warp(ci, K, cameras[i].R, INTER_LINEAR, BORDER_REFLECT, iw);
+
+        // Warp mask.
+        UMat mw;
+        {
+            Mat fm(ci.size(), CV_8U, Scalar(255));
+            comp_warper->warp(fm, K, cameras[i].R, INTER_NEAREST, BORDER_CONSTANT, mw);
+        }
+
+        // Exposure compensation.
+        comp->apply(i, corners_c[i], iw, mw);
+
+        // Convert to 16-bit for blender.
+        UMat iw_s;
+        iw.convertTo(iw_s, CV_16S);
+        iw.release();
+
+        // Scale seam mask from seam resolution to compose resolution.
+        UMat sd;
+        UMat sr;
+        dilate(masks_seam[i], sd, Mat());
+        resize(sd, sr, mw.size(), 0, 0, INTER_LINEAR_EXACT);
+
+        // Compose mask = seam mask AND warped mask.
+        UMat cm;
+        bitwise_and(sr, mw, cm);
+
+        blender->feed(iw_s, cm, corners_c[i]);
+
+        if ((i + 1) % 10 == 0 || i == num - 1) {
+            cout << "[" << stage << "]   composed " << (i + 1) << "/" << num << endl;
+        }
+    }
+
+    cout << "[" << stage << "] blending..." << endl;
+    Mat result;
+    Mat result_mask;
+    blender->blend(result, result_mask);
+    result.convertTo(result, CV_8U);
+    cout << "[" << stage << "] panorama: " << result.cols << "x" << result.rows << endl;
+    return result;
+}
 } // namespace
 
 int main() {
@@ -685,76 +1068,52 @@ int main() {
             cout << "[Main] POS disabled, all images as single group" << endl;
         }
 
-        vector<StripPanorama> strip_panos;
-        for (size_t i = 0; i < strip_groups.size(); ++i) {
-            if (strip_groups[i].images.size() < 2) {
-                cout << "[Strip " << i << "] < 2 images, skip" << endl;
-                continue;
+        Mat panorama;
+        if (use_pos && strip_groups.size() > 1) {
+            // ---------------------------------------------------------------
+            // Multi-strip global pipeline.  All original images are fed into
+            // a single stitching pass.  GPS coordinates determine which
+            // image-pairs are feature-matched (within-strip sequential
+            // neighbours + cross-strip spatial neighbours).
+            // ---------------------------------------------------------------
+            cout << "[Main] multi-strip mode, ordering by cross-track position..." << endl;
+            orderStripGroupsByCrossTrack(strip_groups);
+            for (size_t i = 0; i < strip_groups.size(); ++i) {
+                cout << "[Main]   strip " << i << ": "
+                     << strip_groups[i].images.size() << " images" << endl;
             }
-            cout << "[Strip " << i << "] intra-strip stitch, images=" << strip_groups[i].images.size() << endl;
-            vector<string> strip_image_tags;
-            strip_image_tags.reserve(strip_groups[i].images.size());
-            for (size_t j = 0; j < strip_groups[i].images.size(); ++j) {
-                if (j < strip_groups[i].records.size() && !strip_groups[i].records[j].file_id.empty()) {
-                    strip_image_tags.push_back(strip_groups[i].records[j].file_id);
-                } else {
-                    strip_image_tags.push_back("strip" + to_string(i) + "_img#" + to_string(j));
+
+            const auto input = buildGlobalStitchInput(strip_groups, tuning);
+            cout << "[Main] global pipeline: total_images=" << input.images.size()
+                 << ", within_strip_pairs=" << input.num_within_pairs
+                 << ", cross_strip_pairs=" << input.num_cross_pairs << endl;
+
+            panorama = stitchGlobalPipeline(input.images, input.match_mask, tuning);
+        } else {
+            // ---------------------------------------------------------------
+            // Single strip (or POS disabled): fall back to the proven
+            // sequential stitcher on all images in one go.
+            // ---------------------------------------------------------------
+            vector<Mat> all_images;
+            vector<string> all_tags;
+            for (size_t i = 0; i < strip_groups.size(); ++i) {
+                for (size_t j = 0; j < strip_groups[i].images.size(); ++j) {
+                    all_images.push_back(strip_groups[i].images[j]);
+                    if (j < strip_groups[i].records.size() &&
+                        !strip_groups[i].records[j].file_id.empty()) {
+                        all_tags.push_back(strip_groups[i].records[j].file_id);
+                    } else {
+                        all_tags.push_back("img#" + to_string(all_images.size() - 1));
+                    }
                 }
             }
-            cout << "[Strip " << i << "] image order:";
-            for (const auto &tag : strip_image_tags) {
-                cout << " " << tag;
+            if (all_images.size() < 2) {
+                throw runtime_error("need at least 2 images to stitch");
             }
-            cout << endl;
-
-            StitchTuning strip_tuning = tuning;
-            if (tuning.adaptive_speed &&
-                static_cast<int>(strip_groups[i].images.size()) >= tuning.large_strip_threshold) {
-                strip_tuning.sift_features = std::min(strip_tuning.sift_features, tuning.large_strip_sift_features);
-                strip_tuning.range_width = std::min(strip_tuning.range_width, tuning.large_strip_range_width);
-                cout << "[Strip " << i << "] adaptive speed tuning: sift="
-                     << strip_tuning.sift_features << ", range_width=" << strip_tuning.range_width
-                     << " (threshold=" << tuning.large_strip_threshold << ")" << endl;
-            }
-
-            Mat strip_pano = stitchRobustly(
-                strip_groups[i].images,
-                Stitcher::SCANS,
-                "Strip " + to_string(i),
-                strip_tuning,
-                strip_tuning.range_width,
-                &strip_image_tags);
-            autoCropBlackBorder(strip_pano);
-
-            const fs::path strip_output = strip_dir / ("strip_" + to_string(i) + ".jpg");
-            imwrite(strip_output.string(), strip_pano);
-            cout << "[Strip " << i << "] strip saved: " << strip_output << endl;
-
-            strip_panos.push_back({strip_pano, strip_groups[i].records, 0.0});
-        }
-
-        if (strip_panos.empty()) {
-            throw runtime_error("all strip stitches failed, cannot produce panorama");
-        }
-
-        Mat panorama;
-        if (strip_panos.size() == 1) {
-            panorama = strip_panos.front().pano.clone();
-        } else {
-            if (use_pos) {
-                computeCrossTrackOrder(strip_panos);
-            }
-
-            vector<Mat> strip_images;
-            strip_images.reserve(strip_panos.size());
-            for (const auto &strip : strip_panos) {
-                strip_images.push_back(strip.pano);
-            }
-
-            const int global_range = std::max(2, std::min(3, static_cast<int>(strip_images.size())));
-            cout << "[Main] inter-strip stitch, strip_count=" << strip_images.size()
-                 << ", global_range=" << global_range << endl;
-            panorama = stitchRobustly(strip_images, Stitcher::SCANS, "Global", tuning, global_range);
+            cout << "[Main] single-group stitch: " << all_images.size() << " images" << endl;
+            panorama = stitchRobustly(
+                all_images, Stitcher::SCANS, "Stitch", tuning,
+                tuning.range_width, &all_tags);
         }
 
         autoCropBlackBorder(panorama);
