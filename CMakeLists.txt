@@ -11,7 +11,7 @@ endif()
 set(OPENCV_BUILD_PATH "你的opencv build路径")
 
 # OpenCV 安装路径 (可通过 -DOpenCV_DIR=... 覆盖，FORCE 确保 CLion 等 IDE 能正确使用)
-set(OpenCV_DIR OPENCV_BUILD_PATH CACHE PATH "OpenCV config directory" FORCE)
+set(OpenCV_DIR "${OPENCV_BUILD_PATH}" CACHE PATH "OpenCV config directory" FORCE)
 find_package(OpenCV REQUIRED)
 
 add_executable(drone_image_stitch_cpp
