@@ -35,7 +35,7 @@ struct StripPanorama {
 };
 
 struct StitchTuning {
-    int sift_features = 2200;
+    int sift_features = 1500;
     float match_conf = 0.35f;
     int min_good_matches = 10;
     int min_inliers = 8;
@@ -54,6 +54,15 @@ struct StitchTuning {
 
     bool use_opencl = true;
     bool try_gpu = true;
+
+    // Speed-oriented knobs (designed to keep quality stable).
+    double registration_resol_mpx = 0.40;
+    double seam_estimation_resol_mpx = 0.10;
+    double compositing_resol_mpx = -1.0; // keep full-res compose by default.
+    bool adaptive_speed = true;
+    int large_strip_threshold = 36;
+    int large_strip_sift_features = 1000;
+    int large_strip_range_width = 4;
 };
 
 struct PairDiagnostics {
@@ -131,6 +140,13 @@ StitchTuning loadStitchTuning() {
     tuning.anchor_window = envIntOr("STITCH_ANCHOR_WINDOW", tuning.anchor_window, 1);
     tuning.use_opencl = envEnabled("STITCH_USE_OPENCL", tuning.use_opencl);
     tuning.try_gpu = envEnabled("STITCH_TRY_GPU", tuning.try_gpu);
+    tuning.registration_resol_mpx = envFloatOr("STITCH_REGISTRATION_RESOL_MPX", static_cast<float>(tuning.registration_resol_mpx), 0.05f);
+    tuning.seam_estimation_resol_mpx = envFloatOr("STITCH_SEAM_RESOL_MPX", static_cast<float>(tuning.seam_estimation_resol_mpx), 0.05f);
+    tuning.compositing_resol_mpx = envFloatOr("STITCH_COMPOSITING_RESOL_MPX", static_cast<float>(tuning.compositing_resol_mpx), -1.0f);
+    tuning.adaptive_speed = envEnabled("STITCH_ADAPTIVE_SPEED", tuning.adaptive_speed);
+    tuning.large_strip_threshold = envIntOr("STITCH_LARGE_STRIP_THRESHOLD", tuning.large_strip_threshold, 2);
+    tuning.large_strip_sift_features = envIntOr("STITCH_LARGE_STRIP_SIFT_FEATURES", tuning.large_strip_sift_features, 256);
+    tuning.large_strip_range_width = envIntOr("STITCH_LARGE_STRIP_RANGE_WIDTH", tuning.large_strip_range_width, 2);
     return tuning;
 }
 
@@ -148,6 +164,44 @@ string imageTagAt(const vector<string> *image_tags, const size_t idx) {
         return "img#" + to_string(idx);
     }
     return image_tags->at(idx);
+}
+
+bool looksLikeOpenClFailure(const cv::Exception &e) {
+    const string msg = e.what();
+    return msg.find("OpenCL") != string::npos ||
+           msg.find("clBuildProgram") != string::npos ||
+           msg.find("CL_INVALID_COMMAND_QUEUE") != string::npos ||
+           msg.find("cv::ocl::Program") != string::npos;
+}
+
+bool probeOpenClRuntime(const string &stage) {
+    try {
+        Mat src(32, 32, CV_8UC1, Scalar(7));
+        UMat u_src;
+        UMat u_dst;
+        src.copyTo(u_src);
+        add(u_src, u_src, u_dst);
+        Mat dst;
+        u_dst.copyTo(dst);
+        return true;
+    } catch (const cv::Exception &e) {
+        cerr << "[" << stage << "] OpenCL probe failed, fallback to CPU: " << e.what() << endl;
+        cv::ocl::setUseOpenCL(false);
+        return false;
+    }
+}
+
+void logStitchPhasePlan(const string &stage) {
+    cout << "[" << stage << "] phase begin: feature detection + feature matching" << endl;
+    cout << "[" << stage << "] phase begin: camera parameter estimation" << endl;
+    cout << "[" << stage << "] phase begin: global optimization (bundle adjustment)" << endl;
+}
+
+void logComposePhasePlan(const string &stage) {
+    cout << "[" << stage << "] phase begin: image warping" << endl;
+    cout << "[" << stage << "] phase begin: seam finding" << endl;
+    cout << "[" << stage << "] phase begin: exposure compensation" << endl;
+    cout << "[" << stage << "] phase begin: multi-band blending" << endl;
 }
 
 void logOneShotPairPlan(const string &stage_name, const vector<string> *image_tags) {
@@ -379,6 +433,9 @@ Ptr<Stitcher> createConfiguredStitcher(
 
     stitcher->setPanoConfidenceThresh(tuning.pano_conf_thresh);
     stitcher->setWaveCorrection(false);
+    stitcher->setRegistrationResol(tuning.registration_resol_mpx);
+    stitcher->setSeamEstimationResol(tuning.seam_estimation_resol_mpx);
+    stitcher->setCompositingResol(tuning.compositing_resol_mpx);
 
     stitcher->setFeaturesFinder(SIFT::create(tuning.sift_features));
 
@@ -435,8 +492,29 @@ Stitcher::Status stitchWithMode(
         }
     }
 
-    Ptr<Stitcher> stitcher = createConfiguredStitcher(mode, tuning, range_width_override);
-    return stitcher->stitch(images, output);
+    auto run_stitch = [&](const StitchTuning &local_tuning) -> Stitcher::Status {
+        Ptr<Stitcher> stitcher = createConfiguredStitcher(mode, local_tuning, range_width_override);
+        logStitchPhasePlan(stage);
+        const auto estimate_status = stitcher->estimateTransform(images);
+        if (estimate_status != Stitcher::OK) {
+            return estimate_status;
+        }
+        logComposePhasePlan(stage);
+        return stitcher->composePanorama(output);
+    };
+
+    try {
+        return run_stitch(tuning);
+    } catch (const cv::Exception &e) {
+        if (!looksLikeOpenClFailure(e) || !cv::ocl::useOpenCL()) {
+            throw;
+        }
+        cerr << "[" << stage << "] OpenCL runtime failure detected, retry on CPU: " << e.what() << endl;
+        cv::ocl::setUseOpenCL(false);
+        StitchTuning cpu_tuning = tuning;
+        cpu_tuning.try_gpu = false;
+        return run_stitch(cpu_tuning);
+    }
 }
 
 optional<Mat> stitchSequentially(
@@ -537,17 +615,20 @@ Mat stitchRobustly(
 int main() {
     cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_SILENT);
     const StitchTuning tuning = loadStitchTuning();
-    const bool opencl_available = cv::ocl::haveOpenCL();
-    cv::ocl::setUseOpenCL(tuning.use_opencl && opencl_available);
-    const bool opencl_enabled = cv::ocl::useOpenCL();
-    const auto temp_opencv = fs::temp_directory_path() / "opencv";
-    fs::create_directories(temp_opencv);
+    // 开启 OpenCL
+    // const bool opencl_available = cv::ocl::haveOpenCL();
+    // cv::ocl::setUseOpenCL(tuning.use_opencl && opencl_available);
+    // const bool opencl_enabled = cv::ocl::useOpenCL();
+    // const bool opencl_probe_ok = opencl_enabled ? probeOpenClRuntime("Main") : false;
+    // const auto temp_opencv = fs::temp_directory_path() / "opencv";
+    // fs::create_directories(temp_opencv);
+
     const string image_folder = "../images";
     const string image_type = "visible";
-    const string group = "image_2";
+    const string group = "image_1";
     const string pos_path = "../assets/pos.mti";
 
-    const bool use_pos = envEnabled("STITCH_USE_POS", true);
+    const bool use_pos = envEnabled("STITCH_USE_POS", false);
 
     const string input_folder = image_folder + "/" + image_type + "/" + group;
     const string output_folder = "../output/" + image_type + "/" + group;
@@ -564,10 +645,11 @@ int main() {
         cout << "[Main] POS: " << (use_pos ? "enabled" : "disabled") << endl;
         cout << "[Main] output: " << output_path << endl;
         cout << "[Main] opencl: requested=" << (tuning.use_opencl ? "on" : "off")
-             << ", available=" << (opencl_available ? "yes" : "no")
-             << ", enabled=" << (opencl_enabled ? "yes" : "no")
+             // << ", available=" << (opencl_available ? "yes" : "no")
+             << ", enabled=" << (cv::ocl::useOpenCL() ? "yes" : "no")
+             // << ", probe_ok=" << ((opencl_enabled && opencl_probe_ok) ? "yes" : "no")
              << ", try_gpu=" << (tuning.try_gpu ? "on" : "off") << endl;
-        if (opencl_enabled) {
+        if (cv::ocl::useOpenCL()) {
             const cv::ocl::Device dev = cv::ocl::Device::getDefault();
             cout << "[Main] opencl device: " << dev.vendorName() << " / " << dev.name() << endl;
         }
@@ -578,7 +660,11 @@ int main() {
              << ", affine_bundle=" << (tuning.use_affine_bundle ? "on" : "off")
              << ", affine_warper=" << (tuning.use_affine_warper ? "on" : "off")
              << ", anchor_fallback=" << (tuning.use_anchor_fallback ? "on" : "off")
-             << ", anchor_window=" << tuning.anchor_window << endl;
+             << ", anchor_window=" << tuning.anchor_window
+             << ", reg_mpx=" << tuning.registration_resol_mpx
+             << ", seam_mpx=" << tuning.seam_estimation_resol_mpx
+             << ", compose_mpx=" << tuning.compositing_resol_mpx
+             << ", adaptive_speed=" << (tuning.adaptive_speed ? "on" : "off") << endl;
 
         const auto [images, ids] = ImageLoader::loadWithIds(input_folder);
         cout << "[Main] valid images: " << images.size() << endl;
@@ -621,12 +707,22 @@ int main() {
             }
             cout << endl;
 
+            StitchTuning strip_tuning = tuning;
+            if (tuning.adaptive_speed &&
+                static_cast<int>(strip_groups[i].images.size()) >= tuning.large_strip_threshold) {
+                strip_tuning.sift_features = std::min(strip_tuning.sift_features, tuning.large_strip_sift_features);
+                strip_tuning.range_width = std::min(strip_tuning.range_width, tuning.large_strip_range_width);
+                cout << "[Strip " << i << "] adaptive speed tuning: sift="
+                     << strip_tuning.sift_features << ", range_width=" << strip_tuning.range_width
+                     << " (threshold=" << tuning.large_strip_threshold << ")" << endl;
+            }
+
             Mat strip_pano = stitchRobustly(
                 strip_groups[i].images,
                 Stitcher::SCANS,
                 "Strip " + to_string(i),
-                tuning,
-                tuning.range_width,
+                strip_tuning,
+                strip_tuning.range_width,
                 &strip_image_tags);
             autoCropBlackBorder(strip_pano);
 
