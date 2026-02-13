@@ -1,3 +1,4 @@
+#include <opencv2/core/ocl.hpp>
 #include <opencv2/opencv.hpp>
 #include <opencv2/stitching.hpp>
 #include <opencv2/stitching/detail/blenders.hpp>
@@ -158,13 +159,13 @@ string stitchStatusToString(const Stitcher::Status status) {
         case Stitcher::OK:
             return "OK";
         case Stitcher::ERR_NEED_MORE_IMGS:
-            return "需要更多图像";
+            return "need more images";
         case Stitcher::ERR_HOMOGRAPHY_EST_FAIL:
-            return "单应性矩阵估计失败";
+            return "homography estimation failed";
         case Stitcher::ERR_CAMERA_PARAMS_ADJUST_FAIL:
-            return "相机参数调整失败";
+            return "camera params adjust failed";
         default:
-            return "未知错误";
+            return "unknown error";
     }
 }
 
@@ -315,7 +316,7 @@ void logPairDiagnostics(
     const size_t idx,
     const PairDiagnostics &diag,
     const StitchTuning &tuning) {
-    cout << "[" << stage << "] 失败诊断 idx=" << idx
+    cout << "[" << stage << "] failure diagnostics idx=" << idx
          << ", left={" << matInfo(left) << "}, right={" << matInfo(right) << "}"
          << ", kp_left=" << diag.kp_left
          << ", kp_right=" << diag.kp_right;
@@ -441,7 +442,7 @@ Mat stitchRobustly(
         return output;
     }
 
-    cout << "[" << stage_name << "] 一次性拼接失败，改为序贯拼接: "
+    cout << "[" << stage_name << "] one-shot stitch failed, fallback to sequential: "
          << stitchStatusToString(first_try_status) << endl;
     const auto sequential = stitchSequentially(images, mode, stage_name, tuning, range_width_override);
     if (sequential.has_value()) {
@@ -449,16 +450,20 @@ Mat stitchRobustly(
     }
 
     throw runtime_error(
-        "[" + stage_name + "] 拼接失败: " + stitchStatusToString(first_try_status) +
-        " (错误码: " + to_string(first_try_status) + ")");
+        "[" + stage_name + "] stitch failed: " + stitchStatusToString(first_try_status) +
+        " (code: " + to_string(first_try_status) + ")");
 }
 } // namespace
 
 int main() {
-    constexpr string image_folder = "../images";
-    constexpr string image_type = "visible";
-    constexpr string group = "desert_1";
-    constexpr string pos_path = "../assets/pos.mti";
+    cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_SILENT);
+    cv::ocl::setUseOpenCL(false);
+    const auto temp_opencv = fs::temp_directory_path() / "opencv";
+    fs::create_directories(temp_opencv);
+    const string image_folder = "../images";
+    const string image_type = "visible";
+    const string group = "desert_1";
+    const string pos_path = "../assets/pos.mti";
 
     const bool use_pos = envEnabled("STITCH_USE_POS", false);
 
@@ -475,10 +480,10 @@ int main() {
     const StitchTuning tuning = loadStitchTuning();
 
     try {
-        cout << "[Main] 输入目录: " << input_folder << endl;
-        cout << "[Main] POS开关: " << (use_pos ? "启用" : "禁用") << endl;
-        cout << "[Main] 输出文件: " << output_path << endl;
-        cout << "[Main] Stitch参数: sift=" << tuning.sift_features
+        cout << "[Main] input dir: " << input_folder << endl;
+        cout << "[Main] POS: " << (use_pos ? "enabled" : "disabled") << endl;
+        cout << "[Main] output: " << output_path << endl;
+        cout << "[Main] stitch params: sift=" << tuning.sift_features
              << ", match_conf=" << tuning.match_conf
              << ", range_matcher=" << (tuning.use_range_matcher ? "on" : "off")
              << ", range_width=" << tuning.range_width
@@ -486,31 +491,31 @@ int main() {
              << ", affine_warper=" << (tuning.use_affine_warper ? "on" : "off") << endl;
 
         const auto [images, ids] = ImageLoader::loadWithIds(input_folder);
-        cout << "[Main] 有效图像数量: " << images.size() << endl;
+        cout << "[Main] valid images: " << images.size() << endl;
         if (images.size() < 2) {
-            throw runtime_error("有效图像少于2张，无法拼接");
+            throw runtime_error("need at least 2 images to stitch");
         }
 
         vector<FlightStripGroup> strip_groups;
         if (use_pos) {
-            cout << "[Main] POS文件: " << pos_path << endl;
+            cout << "[Main] POS file: " << pos_path << endl;
             const auto pos_records = PosReader::load(pos_path);
             strip_groups = PosBasedImageGrouper::groupWithRecords(images, ids, pos_records);
             if (strip_groups.empty()) {
-                throw runtime_error("POS分组结果为空，请检查POS文件与图片ID是否匹配");
+                throw runtime_error("POS grouping empty, check POS file and image IDs");
             }
         } else {
             strip_groups.push_back({images, {}});
-            cout << "[Main] 已禁用POS，全部图片作为1组" << endl;
+            cout << "[Main] POS disabled, all images as single group" << endl;
         }
 
         vector<StripPanorama> strip_panos;
         for (size_t i = 0; i < strip_groups.size(); ++i) {
             if (strip_groups[i].images.size() < 2) {
-                cout << "[Strip " << i << "] 图片少于2张，跳过" << endl;
+                cout << "[Strip " << i << "] < 2 images, skip" << endl;
                 continue;
             }
-            cout << "[Strip " << i << "] 开始航带内拼接, images=" << strip_groups[i].images.size() << endl;
+            cout << "[Strip " << i << "] intra-strip stitch, images=" << strip_groups[i].images.size() << endl;
 
             Mat strip_pano = stitchRobustly(
                 strip_groups[i].images,
@@ -522,13 +527,13 @@ int main() {
 
             const fs::path strip_output = strip_dir / ("strip_" + to_string(i) + ".jpg");
             imwrite(strip_output.string(), strip_pano);
-            cout << "[Strip " << i << "] 航带图已保存: " << strip_output << endl;
+            cout << "[Strip " << i << "] strip saved: " << strip_output << endl;
 
             strip_panos.push_back({strip_pano, strip_groups[i].records, 0.0});
         }
 
         if (strip_panos.empty()) {
-            throw runtime_error("所有航带拼接均失败，无法生成整图");
+            throw runtime_error("all strip stitches failed, cannot produce panorama");
         }
 
         Mat panorama;
@@ -546,16 +551,16 @@ int main() {
             }
 
             const int global_range = std::max(2, std::min(3, static_cast<int>(strip_images.size())));
-            cout << "[Main] 开始航带间拼接, strip_count=" << strip_images.size()
+            cout << "[Main] inter-strip stitch, strip_count=" << strip_images.size()
                  << ", global_range=" << global_range << endl;
             panorama = stitchRobustly(strip_images, Stitcher::SCANS, "Global", tuning, global_range);
         }
 
         autoCropBlackBorder(panorama);
         imwrite(output_path.string(), panorama);
-        cout << "[Finish] 拼接完成: " << output_path << endl;
+        cout << "[Finish] done: " << output_path << endl;
     } catch (const exception &e) {
-        cerr << "[Error] 错误: " << e.what() << endl;
+        cerr << "[Error] " << e.what() << endl;
         return 1;
     }
 

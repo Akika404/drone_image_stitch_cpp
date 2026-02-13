@@ -11,14 +11,14 @@ std::vector<FlightStripGroup> PosBasedImageGrouper::groupWithRecords(
     const std::vector<std::string> &image_ids,
     const std::vector<PosRecord> &pos_records) {
     if (images.empty()) {
-        std::cout << "[Group] images为空，返回空分组" << std::endl;
+        std::cout << "[Group] empty images, return empty groups" << std::endl;
         return {};
     }
     if (image_ids.size() != images.size()) {
-        throw std::runtime_error("image_ids 必须与 images 对齐");
+        throw std::runtime_error("image_ids must align with images");
     }
 
-    std::cout << "[Group] 开始分组: images=" << images.size()
+    std::cout << "[Group] grouping: images=" << images.size()
             << ", image_ids=" << image_ids.size()
             << ", pos_records=" << pos_records.size() << std::endl;
 
@@ -49,7 +49,7 @@ std::vector<FlightStripGroup> PosBasedImageGrouper::groupWithRecords(
         }
     }
 
-    std::cout << "[Group] 分组完成: strips=" << strips.size()
+    std::cout << "[Group] done: strips=" << strips.size()
             << ", valid_groups=" << groups.size() << std::endl;
     return groups;
 }
@@ -78,10 +78,10 @@ auto PosBasedImageGrouper::groupByFlightStrips(
         if (r.isValid()) valid_records.push_back(r);
     }
     if (valid_records.empty()) {
-        std::cout << "[Group] POS记录为空或全无效" << std::endl;
+        std::cout << "[Group] POS records empty or all invalid" << std::endl;
         return {};
     }
-    std::cout << "[Group] 有效POS记录: " << valid_records.size()
+    std::cout << "[Group] valid POS records: " << valid_records.size()
             << "/" << records.size() << std::endl;
 
     std::vector<std::vector<PosRecord> > strips;

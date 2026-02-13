@@ -1,4 +1,4 @@
-﻿#include "image_loader.hpp"
+#include "image_loader.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -42,17 +42,17 @@ std::vector<cv::Mat> ImageLoader::load(const std::string &folder) {
     std::ranges::sort(paths);
 
     if (paths.size() < 2) {
-        throw std::runtime_error("至少需要两张图像进行拼接");
+        throw std::runtime_error("need at least 2 images to stitch");
     }
 
     std::vector<cv::Mat> imgs;
     for (auto &p: paths) {
         cv::Mat img = cv::imread(p);
         if (img.empty()) {
-            std::cout << "读取失败: " << p << std::endl;
+            std::cout << "read failed: " << p << std::endl;
             continue;
         }
-        std::cout << "加载: " << p << std::endl;
+        std::cout << "load: " << p << std::endl;
         imgs.push_back(img);
     }
     return imgs;
@@ -75,17 +75,17 @@ LoadedImages ImageLoader::loadWithIds(const std::string &folder) {
     std::ranges::sort(paths);
 
     if (paths.empty()) {
-        throw std::runtime_error("未找到可用图像");
+        throw std::runtime_error("no usable images found");
     }
 
     LoadedImages result;
     for (auto &p: paths) {
         cv::Mat img = cv::imread(p);
         if (img.empty()) {
-            std::cout << "读取失败: " << p << std::endl;
+            std::cout << "read failed: " << p << std::endl;
             continue;
         }
-        std::cout << "加载: " << p << std::endl;
+        std::cout << "load: " << p << std::endl;
         result.images.push_back(img);
         result.ids.push_back(extract_image_id(p));
     }

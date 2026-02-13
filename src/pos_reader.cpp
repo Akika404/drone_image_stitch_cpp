@@ -7,7 +7,7 @@
 std::vector<PosRecord> PosReader::load(const std::string &pos_path) {
     std::ifstream file(pos_path);
     if (!file.is_open()) {
-        throw std::runtime_error("POS文件不存在: " + pos_path);
+        throw std::runtime_error("POS file not found: " + pos_path);
     }
 
     std::vector<PosRecord> records;
@@ -15,7 +15,7 @@ std::vector<PosRecord> PosReader::load(const std::string &pos_path) {
     int total_lines = 0;
     int skipped_lines = 0;
 
-    std::cout << "[POS] 开始读取: " << pos_path << std::endl;
+    std::cout << "[POS] reading: " << pos_path << std::endl;
     while (std::getline(file, line)) {
         ++total_lines;
         if (line.empty()) {
@@ -48,7 +48,7 @@ std::vector<PosRecord> PosReader::load(const std::string &pos_path) {
         }
     }
 
-    std::cout << "[POS] 完成读取: records=" << records.size()
-            << ", 总行数=" << total_lines << ", 跳过=" << skipped_lines << std::endl;
+    std::cout << "[POS] done: records=" << records.size()
+            << ", total_lines=" << total_lines << ", skipped=" << skipped_lines << std::endl;
     return records;
 }
