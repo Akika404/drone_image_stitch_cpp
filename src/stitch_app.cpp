@@ -174,9 +174,12 @@ int runStitchApplication() {
             StitchTuning global_tuning = tuning;
             global_tuning.use_range_matcher = false;
             global_tuning.range_width = 2;
+
+            // todo: 可以取消注释以加快速度，但是图像清晰度会明显下降
             // if (global_tuning.compositing_resol_mpx < 0.0) {
             //     global_tuning.compositing_resol_mpx = 2.0;
             // }
+
             global_tuning.blend_bands = std::min(global_tuning.blend_bands, 3);
             std::cout << "[Main] global-stage: strip_panoramas=" << strip_panoramas.size()
                     << ", compose_mpx=" << global_tuning.compositing_resol_mpx
