@@ -38,8 +38,7 @@ namespace {
                 << ", anchor_window=" << tuning.anchor_window
                 << ", reg_mpx=" << tuning.registration_resol_mpx
                 << ", seam_mpx=" << tuning.seam_estimation_resol_mpx
-                << ", compose_mpx=" << tuning.compositing_resol_mpx
-                << ", adaptive_speed=" << (tuning.adaptive_speed ? "on" : "off") << std::endl;
+                << ", compose_mpx=" << tuning.compositing_resol_mpx << std::endl;
     }
 
     void flattenStripGroups(
@@ -69,6 +68,7 @@ int runStitchApplication() {
     const std::string pos_path = "../assets/pos.mti";
 
     const bool use_pos = true;
+
     const std::string input_folder = image_folder + "/" + image_type + "/" + group;
     const std::string output_folder = "../output/" + image_type + "/" + group;
     fs::create_directories(output_folder);
