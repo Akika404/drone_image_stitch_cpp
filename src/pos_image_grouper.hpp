@@ -32,25 +32,29 @@ private:
         double stability_threshold = 10.0,
         int stability_count = 5);
 
-    /// Compute the "core" heading of a strip using the middle 50% of records
+    /// Compute the "core" bearing of a strip using the middle 50% of records
     /// (immune to edge contamination from turning photos).
-    static double computeCoreHeading(const std::vector<PosRecord> &records);
+    static double computeCoreBearing(const std::vector<PosRecord> &records);
 
-    /// Remove turning photos from both ends of a strip.  Records whose heading
-    /// deviates from the core heading by more than trim_threshold are dropped.
+    /// Remove turning photos from both ends of a strip.  Records whose bearing
+    /// deviates from the core bearing by more than trim_threshold are dropped.
     static void trimStripEdges(
         std::vector<PosRecord> &records,
         double trim_threshold = 15.0);
 
     static std::string normalizeImageId(const std::string &image_id);
 
-    static double normalizeHeading(double heading);
+    /// Normalize any angle to [-180°, 180°].
+    static double normalizeAngle(double angle);
 
-    static double headingDifference(double h1, double h2);
+    /// Shortest angular distance between two angles (0°–180°).
+    static double angleDifference(double a1, double a2);
 
-    static double averageHeading(const std::vector<double> &headings);
+    /// Circular average of a list of angles (degrees).
+    static double averageAngle(const std::vector<double> &angles);
 
-    static double stripAverageHeading(const std::vector<PosRecord> &records);
+    /// Average bearing of records in a strip (uses record.bearing).
+    static double stripAverageBearing(const std::vector<PosRecord> &records);
 
     /// Compute the flight axis (0°–180°) from a single strip's records using
     /// the double-angle circular averaging trick (folds 0° and 180° into the

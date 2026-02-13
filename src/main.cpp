@@ -265,7 +265,7 @@ double averageFlightAxisHeading(const vector<PosRecord> &records) {
     double sin_sum = 0.0;
     double cos_sum = 0.0;
     for (const auto &record : records) {
-        const double angle = degreeToRadian(record.heading);
+        const double angle = degreeToRadian(record.bearing);
         sin_sum += std::sin(2.0 * angle);
         cos_sum += std::cos(2.0 * angle);
     }
@@ -1008,10 +1008,10 @@ int main() {
 
     const string image_folder = "../images";
     const string image_type = "visible";
-    const string group = "image_1";
+    const string group = "full";
     const string pos_path = "../assets/pos.mti";
 
-    const bool use_pos = envEnabled("STITCH_USE_POS", false);
+    const bool use_pos = envEnabled("STITCH_USE_POS", true);
 
     const string input_folder = image_folder + "/" + image_type + "/" + group;
     const string output_folder = "../output/" + image_type + "/" + group;

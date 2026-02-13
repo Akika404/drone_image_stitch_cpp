@@ -126,11 +126,11 @@ auto PosBasedImageGrouper::groupByFlightStrips(
     }
 
     // -----------------------------------------------------------------------
-    // Step 3 — replace POS heading with GPS-based flight bearing
-    //          The POS heading column is often the camera/gimbal yaw, NOT the
-    //          compass flight direction. Computing the bearing from consecutive
-    //          GPS coordinates gives the actual flight direction, which is much
-    //          more reliable for strip splitting.
+    // Step 3 — compute GPS-based flight bearing for each record
+    //          The POS kappa (κ) column is the camera orientation angle, NOT
+    //          the flight compass direction.  Computing the bearing from
+    //          consecutive GPS coordinates gives the actual flight direction,
+    //          which is much more reliable for strip splitting.
     // -----------------------------------------------------------------------
     const double cos_lat = std::cos(survey[0].latitude * CV_PI / 180.0);
     for (size_t i = 0; i + 1 < survey.size(); i++) {
@@ -138,16 +138,16 @@ auto PosBasedImageGrouper::groupByFlightStrips(
         const double dlon = (survey[i + 1].longitude - survey[i].longitude) * cos_lat;
         const double dist = std::sqrt(dlat * dlat + dlon * dlon);
         if (dist > 1e-9) {
-            survey[i].heading = std::atan2(dlon, dlat) * 180.0 / CV_PI;
+            survey[i].bearing = std::atan2(dlon, dlat) * 180.0 / CV_PI;
         }
-        // else: drone is hovering; keep previous heading
+        // else: drone is hovering; bearing stays 0 (default)
     }
     if (survey.size() > 1) {
-        survey.back().heading = survey[survey.size() - 2].heading;
+        survey.back().bearing = survey[survey.size() - 2].bearing;
     }
 
     // -----------------------------------------------------------------------
-    // Step 4 — state machine: split into strips by heading changes
+    // Step 4 — state machine: split into strips by bearing changes
     // -----------------------------------------------------------------------
     std::vector<std::vector<PosRecord> > strips;
     std::vector<PosRecord> current_strip_records;
@@ -165,11 +165,11 @@ auto PosBasedImageGrouper::groupByFlightStrips(
                 recent.insert(recent.end(),
                               current_strip_records.begin() + static_cast<long>(start),
                               current_strip_records.end());
-                double avg_heading = stripAverageHeading(recent);
-                double diff_from_avg = headingDifference(current_record.heading, avg_heading);
+                double avg_bearing = stripAverageBearing(recent);
+                double diff_from_avg = angleDifference(current_record.bearing, avg_bearing);
                 const PosRecord *prev_record = i > 0 ? &survey[i - 1] : nullptr;
                 double diff_from_prev = prev_record
-                                            ? headingDifference(current_record.heading, prev_record->heading)
+                                            ? angleDifference(current_record.bearing, prev_record->bearing)
                                             : 0.0;
                 if (diff_from_prev > heading_threshold || diff_from_avg > heading_threshold) {
                     if (static_cast<int>(current_strip_records.size()) >= min_strip_records) {
@@ -189,17 +189,17 @@ auto PosBasedImageGrouper::groupByFlightStrips(
                 stable_buffer.push_back(current_record);
             } else {
                 const auto &last_in_buffer = stable_buffer.back();
-                double diff = headingDifference(current_record.heading, last_in_buffer.heading);
+                double diff = angleDifference(current_record.bearing, last_in_buffer.bearing);
                 if (diff <= stability_threshold) {
                     stable_buffer.push_back(current_record);
                     if (static_cast<int>(stable_buffer.size()) >= stability_count) {
-                        std::vector<double> buffer_headings;
-                        buffer_headings.reserve(stable_buffer.size());
-                        for (auto &r: stable_buffer) buffer_headings.push_back(r.heading);
-                        double avg_buffer_heading = averageHeading(buffer_headings);
+                        std::vector<double> buffer_bearings;
+                        buffer_bearings.reserve(stable_buffer.size());
+                        for (auto &r: stable_buffer) buffer_bearings.push_back(r.bearing);
+                        double avg_buffer_bearing = averageAngle(buffer_bearings);
                         bool all_stable = true;
-                        for (auto &h: buffer_headings) {
-                            if (headingDifference(h, avg_buffer_heading) > stability_threshold) {
+                        for (auto &b: buffer_bearings) {
+                            if (angleDifference(b, avg_buffer_bearing) > stability_threshold) {
                                 all_stable = false;
                                 break;
                             }
@@ -286,45 +286,45 @@ std::string PosBasedImageGrouper::normalizeImageId(const std::string &image_id) 
     return base;
 }
 
-double PosBasedImageGrouper::normalizeHeading(double heading) {
-    while (heading > 180.0) heading -= 360.0;
-    while (heading < -180.0) heading += 360.0;
-    return heading;
+double PosBasedImageGrouper::normalizeAngle(double angle) {
+    while (angle > 180.0) angle -= 360.0;
+    while (angle < -180.0) angle += 360.0;
+    return angle;
 }
 
-double PosBasedImageGrouper::headingDifference(double h1, double h2) {
-    h1 = normalizeHeading(h1);
-    h2 = normalizeHeading(h2);
-    double diff = std::abs(h1 - h2);
+double PosBasedImageGrouper::angleDifference(double a1, double a2) {
+    a1 = normalizeAngle(a1);
+    a2 = normalizeAngle(a2);
+    double diff = std::abs(a1 - a2);
     if (diff > 180.0) diff = 360.0 - diff;
     return diff;
 }
 
-double PosBasedImageGrouper::averageHeading(const std::vector<double> &headings) {
-    if (headings.empty()) return 0.0;
+double PosBasedImageGrouper::averageAngle(const std::vector<double> &angles) {
+    if (angles.empty()) return 0.0;
     double sin_sum = 0.0;
     double cos_sum = 0.0;
-    for (auto &h: headings) {
-        const double rad = h * CV_PI / 180.0;
+    for (auto &a: angles) {
+        const double rad = a * CV_PI / 180.0;
         sin_sum += std::sin(rad);
         cos_sum += std::cos(rad);
     }
     return std::atan2(sin_sum, cos_sum) * 180.0 / CV_PI;
 }
 
-double PosBasedImageGrouper::stripAverageHeading(const std::vector<PosRecord> &records) {
+double PosBasedImageGrouper::stripAverageBearing(const std::vector<PosRecord> &records) {
     if (records.empty()) return 0.0;
-    std::vector<double> headings;
-    headings.reserve(records.size());
-    for (auto &r: records) headings.push_back(r.heading);
-    return averageHeading(headings);
+    std::vector<double> bearings;
+    bearings.reserve(records.size());
+    for (auto &r: records) bearings.push_back(r.bearing);
+    return averageAngle(bearings);
 }
 
 double PosBasedImageGrouper::computeFlightAxis(const std::vector<PosRecord> &records) {
     if (records.empty()) return 0.0;
     double sin2_sum = 0.0, cos2_sum = 0.0;
     for (auto &r : records) {
-        const double rad = r.heading * CV_PI / 180.0;
+        const double rad = r.bearing * CV_PI / 180.0;
         sin2_sum += std::sin(2.0 * rad);
         cos2_sum += std::cos(2.0 * rad);
     }
@@ -339,7 +339,7 @@ double PosBasedImageGrouper::computeFlightAxis(
     double sin2_sum = 0.0, cos2_sum = 0.0;
     for (auto &s : strips) {
         for (auto &r : s) {
-            const double rad = r.heading * CV_PI / 180.0;
+            const double rad = r.bearing * CV_PI / 180.0;
             sin2_sum += std::sin(2.0 * rad);
             cos2_sum += std::cos(2.0 * rad);
         }
@@ -349,7 +349,7 @@ double PosBasedImageGrouper::computeFlightAxis(
     return axis;
 }
 
-double PosBasedImageGrouper::computeCoreHeading(const std::vector<PosRecord> &records) {
+double PosBasedImageGrouper::computeCoreBearing(const std::vector<PosRecord> &records) {
     if (records.empty()) return 0.0;
     // Use the middle 50% of records — these are guaranteed to be straight-line
     // flight, uncontaminated by turning photos at the edges.
@@ -357,14 +357,14 @@ double PosBasedImageGrouper::computeCoreHeading(const std::vector<PosRecord> &re
     const size_t start = n / 4;
     size_t end = start + n / 2;
     if (end > n) end = n;
-    if (end <= start) return stripAverageHeading(records);
+    if (end <= start) return stripAverageBearing(records);
 
-    std::vector<double> mid_headings;
-    mid_headings.reserve(end - start);
+    std::vector<double> mid_bearings;
+    mid_bearings.reserve(end - start);
     for (size_t i = start; i < end; i++) {
-        mid_headings.push_back(records[i].heading);
+        mid_bearings.push_back(records[i].bearing);
     }
-    return averageHeading(mid_headings);
+    return averageAngle(mid_bearings);
 }
 
 void PosBasedImageGrouper::trimStripEdges(
@@ -372,11 +372,11 @@ void PosBasedImageGrouper::trimStripEdges(
     const double trim_threshold) {
     if (records.size() < 6) return;  // too short to trim safely
 
-    const double core = computeCoreHeading(records);
+    const double core = computeCoreBearing(records);
 
-    // Trim from front: remove records deviating from core heading.
+    // Trim from front: remove records deviating from core bearing.
     while (records.size() > 3) {
-        if (headingDifference(records.front().heading, core) > trim_threshold) {
+        if (angleDifference(records.front().bearing, core) > trim_threshold) {
             records.erase(records.begin());
         } else {
             break;
@@ -385,7 +385,7 @@ void PosBasedImageGrouper::trimStripEdges(
 
     // Trim from back.
     while (records.size() > 3) {
-        if (headingDifference(records.back().heading, core) > trim_threshold) {
+        if (angleDifference(records.back().bearing, core) > trim_threshold) {
             records.pop_back();
         } else {
             break;
