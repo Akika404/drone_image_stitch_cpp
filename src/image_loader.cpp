@@ -10,23 +10,23 @@
 namespace fs = std::filesystem;
 
 namespace {
-std::string extract_image_id(const std::string &path) {
-    fs::path p(path);
-    std::string base = p.filename().string();
-    auto pos = base.find('_');
-    if (pos != std::string::npos) {
-        return base.substr(0, pos);
+    std::string extract_image_id(const std::string &path) {
+        fs::path p(path);
+        std::string base = p.filename().string();
+        auto pos = base.find('_');
+        if (pos != std::string::npos) {
+            return base.substr(0, pos);
+        }
+        auto dot = base.find_last_of('.');
+        if (dot != std::string::npos) {
+            return base.substr(0, dot);
+        }
+        return base;
     }
-    auto dot = base.find_last_of('.');
-    if (dot != std::string::npos) {
-        return base.substr(0, dot);
-    }
-    return base;
-}
 }
 
 std::vector<cv::Mat> ImageLoader::load(const std::string &folder) {
-    const std::vector<std::string> exts = {"jpg", "jpeg", "png", "bmp", "tiff"};
+    const std::vector<std::string> exts = {"jpg", "jpeg", "png", "bmp"};
     std::vector<std::string> paths;
 
     for (auto &p: fs::directory_iterator(folder)) {
