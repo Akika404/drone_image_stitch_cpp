@@ -248,6 +248,7 @@ auto PosBasedImageGrouper::groupByFlightStrips(
         std::cout << "[Group] dominant survey axis: " << survey_axis
                 << "deg" << std::endl;
 
+        // 这个地方用于过滤转弯时的部分，低于此数量的照片的分组会被舍弃掉
         constexpr double axis_tolerance = 20.0;
         std::vector<std::vector<PosRecord> > aligned;
         for (size_t si = 0; si < strips.size(); si++) {
@@ -374,9 +375,74 @@ void PosBasedImageGrouper::trimStripEdges(
 
     const double core = computeCoreBearing(records);
 
-    // Trim from front: remove records deviating from core bearing.
+    // -----------------------------------------------------------------------
+    // Build a reference centre-line from the middle 50% of records.
+    // These interior records are guaranteed to be stable straight-flight.
+    // -----------------------------------------------------------------------
+    const size_t n = records.size();
+    const size_t q1 = n / 4;
+    size_t q3 = q1 + n / 2;
+    if (q3 > n) q3 = n;
+    if (q3 <= q1 + 1) {
+        // Fallback: strip too short for centre-line, use bearing only.
+        while (records.size() > 3) {
+            if (angleDifference(records.front().bearing, core) > trim_threshold)
+                records.erase(records.begin());
+            else break;
+        }
+        while (records.size() > 3) {
+            if (angleDifference(records.back().bearing, core) > trim_threshold)
+                records.pop_back();
+            else break;
+        }
+        return;
+    }
+
+    // Approximate cos(latitude) for lon→metre-like conversion.
+    const double cos_lat = std::cos(records[n / 2].latitude * CV_PI / 180.0);
+
+    // Centre-line direction vector from q1 to q3-1 (interior endpoints).
+    const double line_dx = (records[q3 - 1].longitude - records[q1].longitude) * cos_lat;
+    const double line_dy = records[q3 - 1].latitude - records[q1].latitude;
+    const double line_len = std::sqrt(line_dx * line_dx + line_dy * line_dy);
+
+    // Anchor point on the centre-line (use q1).
+    const double anchor_lon = records[q1].longitude;
+    const double anchor_lat = records[q1].latitude;
+
+    // Average along-track spacing in the interior, used to set a sensible
+    // cross-track threshold that adapts to flight altitude / photo interval.
+    double along_sum = 0;
+    for (size_t i = q1; i + 1 < q3; i++) {
+        const double adx = (records[i + 1].longitude - records[i].longitude) * cos_lat;
+        const double ady = records[i + 1].latitude - records[i].latitude;
+        along_sum += std::sqrt(adx * adx + ady * ady);
+    }
+    const double avg_spacing = (q3 - q1 > 1)
+                                   ? along_sum / static_cast<double>(q3 - q1 - 1)
+                                   : line_len;
+
+    // Cross-track distance threshold: 1.5× average photo spacing.
+    // This is generous enough to tolerate natural GPS drift in straight flight,
+    // but catches even the first turning photo whose lateral offset is already
+    // noticeable.
+    const double ct_threshold = avg_spacing * 1.5;
+
+    // Helper: compute cross-track distance (perpendicular to centre-line) for
+    // a given record.  Returns 0 if the centre-line is degenerate.
+    auto crossTrackDist = [&](const PosRecord &rec) -> double {
+        if (line_len < 1e-12) return 0.0;
+        const double px = (rec.longitude - anchor_lon) * cos_lat;
+        const double py = rec.latitude - anchor_lat;
+        // |cross product| / |line| = perpendicular distance
+        return std::abs(px * line_dy - py * line_dx) / line_len;
+    };
+
+    // Trim from front: remove records deviating by bearing OR cross-track.
     while (records.size() > 3) {
-        if (angleDifference(records.front().bearing, core) > trim_threshold) {
+        const bool bearing_bad = angleDifference(records.front().bearing, core) > trim_threshold;
+        const bool position_bad = crossTrackDist(records.front()) > ct_threshold;
+        if (bearing_bad || position_bad) {
             records.erase(records.begin());
         } else {
             break;
@@ -385,7 +451,9 @@ void PosBasedImageGrouper::trimStripEdges(
 
     // Trim from back.
     while (records.size() > 3) {
-        if (angleDifference(records.back().bearing, core) > trim_threshold) {
+        const bool bearing_bad = angleDifference(records.back().bearing, core) > trim_threshold;
+        const bool position_bad = crossTrackDist(records.back()) > ct_threshold;
+        if (bearing_bad || position_bad) {
             records.pop_back();
         } else {
             break;
