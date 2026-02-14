@@ -3,7 +3,6 @@
 #include <opencv2/core/ocl.hpp>
 #include <opencv2/opencv.hpp>
 
-#include <cmath>
 #include <algorithm>
 #include <filesystem>
 #include <iomanip>
@@ -168,14 +167,14 @@ int runStitchApplication() {
     cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_SILENT);
     const StitchTuning tuning = loadStitchTuning();
 
-    const std::string image_folder = "../images";
-    const std::string image_type = "visible";
-    const std::string group = "full";
-    const std::string pos_path = "../assets/pos.mti";
+    constexpr std::string image_folder = "../images";
+    constexpr std::string image_type = "visible";
+    constexpr std::string group = "full";
+    constexpr std::string pos_path = "../assets/pos.mti";
 
-    const bool use_pos = true;
+    constexpr bool use_pos = true;
 
-    const std::string input_folder = image_folder + "/" + image_type + "/" + group;
+    constexpr std::string input_folder = image_folder + "/" + image_type + "/" + group;
     const std::string output_folder = "../output/" + image_type + "/" + group;
     fs::create_directories(output_folder);
 
@@ -253,7 +252,7 @@ int runStitchApplication() {
             global_tuning.use_range_matcher = false;
             global_tuning.range_width = 2;
 
-            // todo: 可以取消注释以加快速度，但是图像清晰度会明显下降
+            // 可以取消注释以加快速度，但是图像清晰度会明显下降
             // if (global_tuning.compositing_resol_mpx < 0.0) {
             //     global_tuning.compositing_resol_mpx = 2.0;
             // }
