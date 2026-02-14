@@ -27,7 +27,7 @@ struct StitchTuning {
     float pano_conf_thresh = 0.7f;
 
     /// 顺序拼接失败时，是否尝试用 anchor 图像辅助拼接
-    bool use_anchor_fallback = true;
+    bool use_anchor_fallback = false;
     /// 顺序拼接时保留的 anchor 窗口大小（最近 N 张图）
     int anchor_window = 4;
 
