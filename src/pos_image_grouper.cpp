@@ -86,6 +86,7 @@ std::vector<std::vector<cv::Mat> > PosBasedImageGrouper::group(
 auto PosBasedImageGrouper::groupByFlightStrips(
     const std::vector<PosRecord> &records,
     double heading_threshold,
+    double omega_threshold,
     int min_strip_records,
     double stability_threshold,
     int stability_count) -> std::vector<std::vector<PosRecord> > {
@@ -171,7 +172,11 @@ auto PosBasedImageGrouper::groupByFlightStrips(
                 double diff_from_prev = prev_record
                                             ? angleDifference(current_record.bearing, prev_record->bearing)
                                             : 0.0;
-                if (diff_from_prev > heading_threshold || diff_from_avg > heading_threshold) {
+                double diff_omega = prev_record
+                                        ? std::abs(current_record.omega - prev_record->omega)
+                                        : 0.0;
+                if (diff_from_prev > heading_threshold || diff_from_avg > heading_threshold ||
+                    diff_omega > omega_threshold) {
                     if (static_cast<int>(current_strip_records.size()) >= min_strip_records) {
                         strips.push_back(current_strip_records);
                     }
@@ -190,16 +195,23 @@ auto PosBasedImageGrouper::groupByFlightStrips(
             } else {
                 const auto &last_in_buffer = stable_buffer.back();
                 double diff = angleDifference(current_record.bearing, last_in_buffer.bearing);
-                if (diff <= stability_threshold) {
+                double diff_omega = std::abs(current_record.omega - last_in_buffer.omega);
+                if (diff <= stability_threshold && diff_omega <= omega_threshold) {
                     stable_buffer.push_back(current_record);
                     if (static_cast<int>(stable_buffer.size()) >= stability_count) {
                         std::vector<double> buffer_bearings;
                         buffer_bearings.reserve(stable_buffer.size());
-                        for (auto &r: stable_buffer) buffer_bearings.push_back(r.bearing);
+                        double sum_omega = 0.0;
+                        for (auto &r: stable_buffer) {
+                            buffer_bearings.push_back(r.bearing);
+                            sum_omega += r.omega;
+                        }
                         double avg_buffer_bearing = averageAngle(buffer_bearings);
+                        double avg_omega = sum_omega / stable_buffer.size();
                         bool all_stable = true;
-                        for (auto &b: buffer_bearings) {
-                            if (angleDifference(b, avg_buffer_bearing) > stability_threshold) {
+                        for (size_t k = 0; k < stable_buffer.size(); ++k) {
+                            if (angleDifference(buffer_bearings[k], avg_buffer_bearing) > stability_threshold ||
+                                std::abs(stable_buffer[k].omega - avg_omega) > omega_threshold) {
                                 all_stable = false;
                                 break;
                             }

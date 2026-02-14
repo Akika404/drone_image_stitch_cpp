@@ -28,6 +28,7 @@ private:
     static std::vector<std::vector<PosRecord> > groupByFlightStrips(
         const std::vector<PosRecord> &records,
         double heading_threshold = 45.0,
+        double omega_threshold = 0.5,
         int min_strip_records = 5,
         double stability_threshold = 10.0,
         int stability_count = 5);
