@@ -162,65 +162,6 @@ namespace {
         }
     }
 
-    double calculateImageSimilarity(const cv::Mat& img1, const cv::Mat& img2) {
-        if (img1.empty() || img2.empty()) return 0.0;
-        
-        cv::Mat gray1, gray2;
-        if (img1.channels() == 3) cv::cvtColor(img1, gray1, cv::COLOR_BGR2GRAY);
-        else gray1 = img1;
-        if (img2.channels() == 3) cv::cvtColor(img2, gray2, cv::COLOR_BGR2GRAY);
-        else gray2 = img2;
-
-        cv::Mat small1, small2;
-        cv::resize(gray1, small1, cv::Size(64, 64));
-        cv::resize(gray2, small2, cv::Size(64, 64));
-
-        cv::Mat diff;
-        cv::absdiff(small1, small2, diff);
-        
-        double mean_diff = cv::mean(diff)[0];
-        // Normalize to 0-1 range (0 = identical, 1 = completely different)
-        // 255 is max difference.
-        return 1.0 - (mean_diff / 255.0);
-    }
-
-    void removeStationaryImages(FlightStripGroup &group) {
-        if (group.images.size() < 2) return;
-
-        std::vector<cv::Mat> new_images;
-        std::vector<PosRecord> new_records;
-        new_images.reserve(group.images.size());
-        new_records.reserve(group.records.size());
-
-        new_images.push_back(group.images[0]);
-        if (!group.records.empty()) new_records.push_back(group.records[0]);
-
-        int dropped = 0;
-        // High similarity threshold implies images are nearly identical
-        const double similarity_threshold = 0.98;
-
-        for (size_t i = 1; i < group.images.size(); ++i) {
-            double sim = calculateImageSimilarity(new_images.back(), group.images[i]);
-            if (sim > similarity_threshold) {
-                dropped++;
-                // If we drop, we don't add to new lists.
-                // Note: we keep the LAST one if we have a sequence of identical ones? 
-                // No, we keep the FIRST one (in new_images) and skip subsequent identical ones.
-                // This preserves the entry point of the hover.
-                // To preserve the EXIT point, we might want to keep the last one.
-                // But for "L" shape, usually the tail is redundant.
-            } else {
-                new_images.push_back(group.images[i]);
-                if (i < group.records.size()) new_records.push_back(group.records[i]);
-            }
-        }
-
-        if (dropped > 0) {
-            std::cout << "[Main] Content-based filter: dropped " << dropped << " stationary images." << std::endl;
-            group.images = new_images;
-            group.records = new_records;
-        }
-    }
 } // namespace
 
 int runStitchApplication() {
@@ -282,9 +223,8 @@ int runStitchApplication() {
 
             StitchTuning strip_tuning = tuning;
             for (size_t si = 0; si < strip_groups.size(); ++si) {
-                // 相似图片过滤
-                // removeRedundantImages(strip_groups[si]);
-                // removeStationaryImages(strip_groups[si]);
+                // 偏航照片过滤
+                removeRedundantImages(strip_groups[si]);
                 std::cout << "[Main] strip-stage: stitching strip " << si
                         << " (" << strip_groups[si].images.size() << " images)..." << std::endl;
                 auto strip_tags = makeStripTags(strip_groups[si]);
