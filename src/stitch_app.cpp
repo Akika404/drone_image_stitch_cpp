@@ -170,19 +170,19 @@ namespace {
         for (size_t i = 0; i < group.records.size() - 1; ++i) {
             const auto &p1 = group.records[i];
             const auto &p2 = group.records[i+1];
-            
-            double dlat = (p2.latitude - p1.latitude) * to_rad;
-            double dlon = (p2.longitude - p1.longitude) * to_rad;
-            double lat_avg = (p1.latitude + p2.latitude) / 2.0 * to_rad;
-            
-            double x = dlon * std::cos(lat_avg);
-            double y = dlat;
+
+            const double dlat = (p2.latitude - p1.latitude) * to_rad;
+            const double dlon = (p2.longitude - p1.longitude) * to_rad;
+            const double lat_avg = (p1.latitude + p2.latitude) / 2.0 * to_rad;
+
+            const double x = dlon * std::cos(lat_avg);
+            const double y = dlat;
             double d = std::sqrt(x*x + y*y) * R;
             dists.push_back(d);
         }
 
         std::vector<double> sorted_dists = dists;
-        std::sort(sorted_dists.begin(), sorted_dists.end());
+        std::ranges::sort(sorted_dists);
         double median_dist = 0;
         if (!sorted_dists.empty()) {
             median_dist = sorted_dists[sorted_dists.size() / 2];
@@ -207,12 +207,12 @@ namespace {
              const auto &p1 = new_records.back(); 
              const auto &p2 = group.records[i];
 
-             double dlat = (p2.latitude - p1.latitude) * to_rad;
-             double dlon = (p2.longitude - p1.longitude) * to_rad;
-             double lat_avg = (p1.latitude + p2.latitude) / 2.0 * to_rad;
-             double x = dlon * std::cos(lat_avg);
-             double y = dlat;
-             double d = std::sqrt(x*x + y*y) * R;
+             const double dlat = (p2.latitude - p1.latitude) * to_rad;
+             const double dlon = (p2.longitude - p1.longitude) * to_rad;
+             const double lat_avg = (p1.latitude + p2.latitude) / 2.0 * to_rad;
+             const double x = dlon * std::cos(lat_avg);
+             const double y = dlat;
+             const double d = std::sqrt(x*x + y*y) * R;
 
              if (d >= threshold) {
                  new_images.push_back(group.images[i]);
