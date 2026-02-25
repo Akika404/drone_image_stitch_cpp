@@ -25,6 +25,8 @@ namespace fs = std::filesystem;
 
 namespace {
     void logRuntimeOptions(const StitchTuning &tuning) {
+        const int strip_sift = tuning.strip_sift_features > 0 ? tuning.strip_sift_features : tuning.sift_features;
+        const int global_sift = tuning.global_sift_features > 0 ? tuning.global_sift_features : tuning.sift_features;
         std::cout << "[Main] opencl: requested=" << (tuning.use_opencl ? "on" : "off")
                 << ", enabled=" << (cv::ocl::useOpenCL() ? "yes" : "no")
                 << ", try_gpu=" << (tuning.try_gpu ? "on" : "off") << std::endl;
@@ -33,6 +35,8 @@ namespace {
             std::cout << "[Main] opencl device: " << dev.vendorName() << " / " << dev.name() << std::endl;
         }
         std::cout << "[Main] stitch params: sift=" << tuning.sift_features
+                << ", strip_sift=" << strip_sift
+                << ", global_sift=" << global_sift
                 << ", match_conf=" << tuning.match_conf
                 << ", range_matcher=" << (tuning.use_range_matcher ? "on" : "off")
                 << ", range_width=" << tuning.range_width
@@ -221,6 +225,9 @@ int runStitchApplication() {
             fs::create_directories(strips_dir);
 
             StitchTuning strip_tuning = tuning;
+            strip_tuning.sift_features = tuning.strip_sift_features > 0
+                ? tuning.strip_sift_features
+                : tuning.sift_features;
             for (size_t si = 0; si < strip_groups.size(); ++si) {
                 // 偏航照片过滤
                 removeRedundantImages(strip_groups[si]);
@@ -249,6 +256,9 @@ int runStitchApplication() {
             }
 
             StitchTuning global_tuning = tuning;
+            global_tuning.sift_features = tuning.global_sift_features > 0
+                ? tuning.global_sift_features
+                : tuning.sift_features;
             global_tuning.use_range_matcher = false;
             global_tuning.range_width = 2;
 
@@ -259,6 +269,7 @@ int runStitchApplication() {
 
             global_tuning.blend_bands = std::min(global_tuning.blend_bands, 3);
             std::cout << "[Main] global-stage: strip_panoramas=" << strip_panoramas.size()
+                    << ", sift=" << global_tuning.sift_features
                     << ", compose_mpx=" << global_tuning.compositing_resol_mpx
                     << ", blend_bands=" << global_tuning.blend_bands << std::endl;
 
@@ -279,8 +290,12 @@ int runStitchApplication() {
                 throw std::runtime_error("need at least 2 images to stitch");
             }
             std::cout << "[Main] single-group stitch: " << all_images.size() << " images" << std::endl;
+            StitchTuning single_group_tuning = tuning;
+            single_group_tuning.sift_features = tuning.strip_sift_features > 0
+                ? tuning.strip_sift_features
+                : tuning.sift_features;
             panorama = stitchRobustly(
-                all_images, cv::Stitcher::SCANS, "Stitch", tuning, tuning.range_width, &all_tags);
+                all_images, cv::Stitcher::SCANS, "Stitch", single_group_tuning, single_group_tuning.range_width, &all_tags);
         }
 
         autoCropBlackBorder(panorama);

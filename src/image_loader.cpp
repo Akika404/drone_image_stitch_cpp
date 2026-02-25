@@ -26,7 +26,9 @@ namespace {
 }
 
 std::vector<cv::Mat> ImageLoader::load(const std::string &folder) {
-    const std::vector<std::string> exts = {"jpg", "jpeg", "png", "bmp"};
+    // const std::vector<std::string> exts = {"jpg", "jpeg", "png", "bmp"};
+    // todo: fix me
+    const std::vector<std::string> exts = {"jpg", "jpeg", "png", "tif"};
     std::vector<std::string> paths;
 
     for (auto &p: fs::directory_iterator(folder)) {

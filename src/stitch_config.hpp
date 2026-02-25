@@ -3,6 +3,10 @@
 struct StitchTuning {
     /// SIFT 每图最大特征点数，用于 cv::SIFT::create()
     int sift_features = 1500;
+    /// strip-stage（行带内部拼接）每图最大特征点数；<=0 时回退到 sift_features
+    int strip_sift_features = 1500;
+    /// global-stage（行带之间拼接）每图最大特征点数；<=0 时回退到 sift_features
+    int global_sift_features = 2500;
     /// Lowe 比率阈值，特征匹配时保留 ratio < match_conf 的匹配，值越大越宽松
     float match_conf = 0.35f;
     /// 配对诊断：最少 good matches 数，低于此值认为无法拼接
