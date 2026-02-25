@@ -11,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "image_loader.hpp"
@@ -24,6 +25,61 @@
 namespace fs = std::filesystem;
 
 namespace {
+    const CameraCalibration *findCameraCalibration(
+        const StitchTuning &tuning,
+        const std::string &camera_id) {
+        for (const auto &cam: tuning.calibration.cameras) {
+            if (cam.camera_id == camera_id) {
+                return &cam;
+            }
+        }
+        return nullptr;
+    }
+
+    bool undistortImagesIfReady(
+        std::vector<cv::Mat> &images,
+        const CameraCalibration &cam,
+        const std::string &image_type) {
+        if (!cam.isMetricReady()) {
+            std::cout << "[Main] undistort skipped for '" << image_type
+                    << "': calibration incomplete" << std::endl;
+            return false;
+        }
+        if (images.empty()) {
+            return false;
+        }
+
+        if (cam.image_width > 0 && cam.image_height > 0) {
+            const cv::Size expected(cam.image_width, cam.image_height);
+            if (images.front().size() != expected) {
+                std::cout << "[Main] undistort skipped for '" << image_type
+                        << "': image size mismatch, expected " << expected.width << "x" << expected.height
+                        << ", got " << images.front().cols << "x" << images.front().rows << std::endl;
+                return false;
+            }
+        }
+
+        cv::Mat K = (cv::Mat_<double>(3, 3) <<
+            *cam.fx_px, 0.0, *cam.cx_px,
+            0.0, *cam.fy_px, *cam.cy_px,
+            0.0, 0.0, 1.0);
+
+        cv::Mat dist(1, 8, CV_64F);
+        for (int i = 0; i < 8; ++i) {
+            dist.at<double>(0, i) = cam.distortion->at(i);
+        }
+
+        for (auto &img: images) {
+            cv::Mat undistorted;
+            cv::undistort(img, undistorted, K, dist);
+            img = std::move(undistorted);
+        }
+
+        std::cout << "[Main] undistort applied for '" << image_type
+                << "' (" << images.size() << " images)" << std::endl;
+        return true;
+    }
+
     void logRuntimeOptions(const StitchTuning &tuning) {
         const int strip_sift = tuning.strip_sift_features > 0 ? tuning.strip_sift_features : tuning.sift_features;
         const int global_sift = tuning.global_sift_features > 0 ? tuning.global_sift_features : tuning.sift_features;
@@ -47,6 +103,14 @@ namespace {
                 << ", reg_mpx=" << tuning.registration_resol_mpx
                 << ", seam_mpx=" << tuning.seam_estimation_resol_mpx
                 << ", compose_mpx=" << tuning.compositing_resol_mpx << std::endl;
+        std::cout << "[Main] calibration metric-ready: "
+                << (tuning.calibration.anyMetricReady() ? "yes" : "no") << std::endl;
+        for (const auto &cam: tuning.calibration.cameras) {
+            std::cout << "[Main]   cam=" << cam.camera_id
+                    << ", intrinsics=" << (cam.hasIntrinsics() ? "yes" : "no")
+                    << ", distortion=" << (cam.hasDistortion() ? "yes" : "no")
+                    << std::endl;
+        }
     }
 
     void flattenStripGroups(
@@ -169,16 +233,16 @@ namespace {
 
 int runStitchApplication() {
     cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_SILENT);
-    const StitchTuning tuning = loadStitchTuning();
 
-    constexpr std::string image_folder = "../images";
-    constexpr std::string image_type = "visible";
-    constexpr std::string group = "full";
-    constexpr std::string pos_path = "../assets/pos.mti";
+    const std::string image_folder = "../images";
+    const std::string image_type = "visible";
+    const std::string group = "full";
+    const std::string pos_path = "../assets/pos.mti";
+    const StitchTuning tuning = loadStitchTuning(image_type);
 
-    constexpr bool use_pos = true;
+    const bool use_pos = true;
 
-    constexpr std::string input_folder = image_folder + "/" + image_type + "/" + group;
+    const std::string input_folder = image_folder + "/" + image_type + "/" + group;
     const std::string output_folder = "../output/" + image_type + "/" + group;
     fs::create_directories(output_folder);
 
@@ -192,10 +256,17 @@ int runStitchApplication() {
         std::cout << "[Main] output: " << output_path << std::endl;
         logRuntimeOptions(tuning);
 
-        const auto [images, ids] = ImageLoader::loadWithIds(input_folder);
+        auto [images, ids] = ImageLoader::loadWithIds(input_folder);
         std::cout << "[Main] valid images: " << images.size() << std::endl;
         if (images.size() < 2) {
             throw std::runtime_error("need at least 2 images to stitch");
+        }
+
+        if (const auto *cam = findCameraCalibration(tuning, image_type)) {
+            undistortImagesIfReady(images, *cam, image_type);
+        } else {
+            std::cout << "[Main] undistort skipped for '" << image_type
+                    << "': no camera_id entry in tuning.calibration.cameras" << std::endl;
         }
 
         std::vector<FlightStripGroup> strip_groups;

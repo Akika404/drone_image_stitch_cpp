@@ -1,5 +1,52 @@
 #pragma once
 
+#include <array>
+#include <optional>
+#include <string>
+#include <vector>
+
+/// 单相机内参/畸变占位。缺失时表示“尚未标定”。
+struct CameraCalibration {
+    std::string camera_id;   // 例: "visible_ortho"
+    int image_width = 0;
+    int image_height = 0;
+
+    // 内参（像素单位），未知时保持 nullopt。
+    std::optional<double> fx_px;
+    std::optional<double> fy_px;
+    std::optional<double> cx_px;
+    std::optional<double> cy_px;
+
+    // OpenCV 畸变参数顺序：k1,k2,p1,p2,k3,k4,k5,k6。
+    std::optional<std::array<double, 8> > distortion;
+
+    // 外参先验（机体->相机），未知时保持 nullopt。
+    std::optional<std::array<double, 3> > lever_arm_m;    // dx,dy,dz (m)
+    std::optional<std::array<double, 3> > boresight_deg;  // rx,ry,rz (deg)
+
+    [[nodiscard]] bool hasIntrinsics() const {
+        return fx_px.has_value() && fy_px.has_value() && cx_px.has_value() && cy_px.has_value();
+    }
+
+    [[nodiscard]] bool hasDistortion() const { return distortion.has_value(); }
+
+    [[nodiscard]] bool isMetricReady() const { return hasIntrinsics() && hasDistortion(); }
+};
+
+/// 多波段相机组占位。默认全部为空，后续可直接填值启用。
+struct MultiBandCalibration {
+    std::vector<CameraCalibration> cameras;
+
+    [[nodiscard]] bool anyMetricReady() const {
+        for (const auto &cam: cameras) {
+            if (cam.isMetricReady()) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
 struct StitchTuning {
     /// SIFT 每图最大特征点数，用于 cv::SIFT::create()
     int sift_features = 1500;
@@ -47,6 +94,9 @@ struct StitchTuning {
     /// 合成阶段分辨率（百万像素），-1 表示全分辨率
     double compositing_resol_mpx = -1.0;
 
+    /// 标定参数占位：允许先空着，后续拿到参数后直接填。
+    MultiBandCalibration calibration;
+
 };
 
-StitchTuning loadStitchTuning();
+StitchTuning loadStitchTuning(const std::string &image_type = "visible");
