@@ -15,7 +15,9 @@ images
 output
 .idea
 assets
-
+out
+build
+.*
 # Precompiled Headers
 *.gch
 *.pch
