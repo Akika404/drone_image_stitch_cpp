@@ -23,25 +23,33 @@ namespace {
         }
         return base;
     }
+
+    std::vector<std::string> collect_image_paths(const std::string &folder) {
+        const std::vector<std::string> exts = {"jpg", "jpeg", "png", "bmp", "tif", "tiff"};
+        std::vector<std::string> paths;
+        paths.reserve(1024);
+
+        for (auto &p: fs::directory_iterator(folder)) {
+            if (!p.is_regular_file()) {
+                continue;
+            }
+            std::string ext = p.path().extension().string();
+            if (!ext.empty() && ext[0] == '.') {
+                ext = ext.substr(1);
+            }
+            std::ranges::transform(ext, ext.begin(), ::tolower);
+            if (std::ranges::find(exts, ext) != exts.end()) {
+                paths.push_back(p.path().string());
+            }
+        }
+
+        std::ranges::sort(paths);
+        return paths;
+    }
 }
 
 std::vector<cv::Mat> ImageLoader::load(const std::string &folder) {
-    // const std::vector<std::string> exts = {"jpg", "jpeg", "png", "bmp"};
-    // todo: fix me
-    const std::vector<std::string> exts = {"jpg", "jpeg", "png", "tif"};
-    std::vector<std::string> paths;
-
-    for (auto &p: fs::directory_iterator(folder)) {
-        if (!p.is_regular_file()) continue;
-        std::string ext = p.path().extension().string();
-        if (!ext.empty() && ext[0] == '.') ext = ext.substr(1);
-        std::ranges::transform(ext, ext.begin(), ::tolower);
-        for (auto &e: exts) {
-            if (ext == e) paths.push_back(p.path().string());
-        }
-    }
-
-    std::ranges::sort(paths);
+    const std::vector<std::string> paths = collect_image_paths(folder);
 
     if (paths.size() < 2) {
         throw std::runtime_error("need at least 2 images to stitch");
@@ -61,20 +69,7 @@ std::vector<cv::Mat> ImageLoader::load(const std::string &folder) {
 }
 
 LoadedImages ImageLoader::loadWithIds(const std::string &folder) {
-    const std::vector<std::string> exts = {"jpg", "jpeg", "png", "bmp", "tiff"};
-    std::vector<std::string> paths;
-
-    for (auto &p: fs::directory_iterator(folder)) {
-        if (!p.is_regular_file()) continue;
-        std::string ext = p.path().extension().string();
-        if (!ext.empty() && ext[0] == '.') ext = ext.substr(1);
-        std::ranges::transform(ext, ext.begin(), ::tolower);
-        for (auto &e: exts) {
-            if (ext == e) paths.push_back(p.path().string());
-        }
-    }
-
-    std::ranges::sort(paths);
+    const std::vector<std::string> paths = collect_image_paths(folder);
 
     if (paths.empty()) {
         throw std::runtime_error("no usable images found");
@@ -90,6 +85,24 @@ LoadedImages ImageLoader::loadWithIds(const std::string &folder) {
         std::cout << "load: " << p << std::endl;
         result.images.push_back(img);
         result.ids.push_back(extract_image_id(p));
+        result.paths.push_back(p);
+    }
+    return result;
+}
+
+LoadedImages ImageLoader::listWithIds(const std::string &folder) {
+    const std::vector<std::string> paths = collect_image_paths(folder);
+
+    if (paths.empty()) {
+        throw std::runtime_error("no usable images found");
+    }
+
+    LoadedImages result;
+    result.ids.reserve(paths.size());
+    result.paths.reserve(paths.size());
+    for (const auto &path: paths) {
+        result.paths.push_back(path);
+        result.ids.push_back(extract_image_id(path));
     }
     return result;
 }
