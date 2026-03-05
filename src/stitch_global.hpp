@@ -24,3 +24,9 @@ cv::Mat stitchGlobalPipeline(
     const std::vector<cv::Mat> &images,
     const cv::UMat &match_mask,
     const StitchTuning &tuning);
+
+/// 自定义航带间拼接（不使用 cv::Stitcher）：
+/// 按相邻航带顺序估计仿射变换并做多频段融合。
+cv::Mat stitchInterStripsCustom(
+    const std::vector<cv::Mat> &strip_panoramas,
+    const StitchTuning &tuning);

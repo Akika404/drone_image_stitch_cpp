@@ -184,6 +184,7 @@ namespace {
         stitcher->setSeamEstimationResol(tuning.seam_estimation_resol_mpx);
         stitcher->setCompositingResol(tuning.compositing_resol_mpx);
 
+        // fixme: switch SIFT or ORB
         stitcher->setFeaturesFinder(cv::SIFT::create(tuning.sift_features));
 
         const int range_width = (range_width_override > 0) ? range_width_override : tuning.range_width;

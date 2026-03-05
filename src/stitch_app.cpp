@@ -142,20 +142,6 @@ namespace {
         return tags;
     }
 
-    cv::UMat makeAdjacentStripMask(const int n, const int neighbor_width) {
-        cv::Mat mask(n, n, CV_8U, cv::Scalar(0));
-        for (int i = 0; i < n; ++i) {
-            for (int j = std::max(0, i - neighbor_width); j <= std::min(n - 1, i + neighbor_width); ++j) {
-                if (i != j) {
-                    mask.at<uchar>(i, j) = 1;
-                }
-            }
-        }
-        cv::UMat umask;
-        mask.copyTo(umask);
-        return umask;
-    }
-
     void removeRedundantImages(FlightStripGroup &group) {
         if (group.records.size() != group.images.size() || group.records.size() < 2) {
             return;
@@ -236,7 +222,7 @@ int runStitchApplication() {
 
     const std::string image_folder = "../images";
     const std::string image_type = "visible";
-    const std::string group = "full";
+    const std::string group = "minfull";
     const std::string pos_path = "../assets/pos.mti";
     const StitchTuning tuning = loadStitchTuning(image_type);
 
@@ -344,15 +330,7 @@ int runStitchApplication() {
                     << ", compose_mpx=" << global_tuning.compositing_resol_mpx
                     << ", blend_bands=" << global_tuning.blend_bands << std::endl;
 
-            cv::UMat strip_mask = makeAdjacentStripMask(static_cast<int>(strip_panoramas.size()), 1);
-            panorama = stitchRobustly(
-                strip_panoramas,
-                cv::Stitcher::SCANS,
-                "Global",
-                global_tuning,
-                global_tuning.range_width,
-                nullptr,
-                &strip_mask);
+            panorama = stitchInterStripsCustom(strip_panoramas, global_tuning);
         } else {
             std::vector<cv::Mat> all_images;
             std::vector<std::string> all_tags;
