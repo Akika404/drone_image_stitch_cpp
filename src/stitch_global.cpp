@@ -1,5 +1,6 @@
 #include "stitch_global.hpp"
 
+#include <opencv2/core/ocl.hpp>
 #include <opencv2/stitching/detail/blenders.hpp>
 #include <opencv2/stitching/detail/exposure_compensate.hpp>
 #include <opencv2/stitching/detail/matchers.hpp>
@@ -19,6 +20,15 @@
 #include "stitch_common.hpp"
 
 namespace {
+    bool looksLikeOpenClFailure(const cv::Exception &e) {
+        const std::string msg = e.what();
+        return msg.find("OpenCL") != std::string::npos ||
+               msg.find("clBuildProgram") != std::string::npos ||
+               msg.find("CL_INVALID_COMMAND_QUEUE") != std::string::npos ||
+               msg.find("cv::ocl::Program") != std::string::npos ||
+               msg.find("AGX") != std::string::npos;
+    }
+
     struct PairAffineEstimate {
         bool ok = false;
         cv::Mat affine_cur_to_ref;
@@ -731,24 +741,54 @@ cv::Mat stitchInterStripsCustom(
     }
 
     const double canvas_area_mpx = static_cast<double>(canvas_w) * static_cast<double>(canvas_h) / 1e6;
-    cv::Ptr<cv::detail::ExposureCompensator> compensator;
-    std::string exposure_mode;
-    if (tuning.use_blocks_gain) {
-        const int block_size = canvas_area_mpx > 80.0 ? 96 : (canvas_area_mpx > 45.0 ? 64 : 32);
-        auto blocks_channels = cv::makePtr<cv::detail::BlocksChannelsCompensator>(block_size, block_size, 2);
-        blocks_channels->setNrGainsFilteringIterations(canvas_area_mpx > 45.0 ? 1 : 2);
-        blocks_channels->setSimilarityThreshold(0.85);
-        compensator = blocks_channels;
-        exposure_mode = "CHANNELS_BLOCKS";
-    } else {
-        auto channels = cv::makePtr<cv::detail::ChannelsCompensator>(2);
-        channels->setSimilarityThreshold(0.9);
-        compensator = channels;
-        exposure_mode = "CHANNELS";
+    const bool disable_opencl_for_large_canvas = canvas_area_mpx >= 120.0 && cv::ocl::useOpenCL();
+    if (disable_opencl_for_large_canvas) {
+        std::cout << "[" << stage << "] canvas is large (" << canvas_area_mpx
+                << " MP), disabling OpenCL for custom global compose" << std::endl;
+        cv::ocl::setUseOpenCL(false);
     }
+
+    auto make_exposure_compensator = [&](const bool prefer_blocks, std::string &mode_out) {
+        cv::Ptr<cv::detail::ExposureCompensator> local_compensator;
+        if (prefer_blocks && canvas_area_mpx <= 120.0) {
+            const int block_size = canvas_area_mpx > 80.0 ? 96 : (canvas_area_mpx > 45.0 ? 64 : 32);
+            auto blocks_channels = cv::makePtr<cv::detail::BlocksChannelsCompensator>(block_size, block_size, 2);
+            blocks_channels->setNrGainsFilteringIterations(canvas_area_mpx > 45.0 ? 1 : 2);
+            blocks_channels->setSimilarityThreshold(0.85);
+            local_compensator = blocks_channels;
+            mode_out = "CHANNELS_BLOCKS";
+        } else if (canvas_area_mpx <= 180.0) {
+            auto channels = cv::makePtr<cv::detail::ChannelsCompensator>(2);
+            channels->setSimilarityThreshold(0.9);
+            local_compensator = channels;
+            mode_out = "CHANNELS";
+        } else {
+            auto gain = cv::makePtr<cv::detail::GainCompensator>(1);
+            gain->setSimilarityThreshold(0.9);
+            local_compensator = gain;
+            mode_out = "GAIN";
+        }
+        return local_compensator;
+    };
+
+    std::string exposure_mode;
+    cv::Ptr<cv::detail::ExposureCompensator> compensator =
+        make_exposure_compensator(tuning.use_blocks_gain, exposure_mode);
     std::cout << "[" << stage << "] exposure compensation begin, mode=" << exposure_mode
             << ", canvas_mpx=" << canvas_area_mpx << std::endl;
-    compensator->feed(corners, warped_imgs, warped_masks);
+    try {
+        compensator->feed(corners, warped_imgs, warped_masks);
+    } catch (const cv::Exception &e) {
+        if (!looksLikeOpenClFailure(e) || disable_opencl_for_large_canvas) {
+            throw;
+        }
+        std::cerr << "[" << stage << "] exposure compensation OpenCL failure, retry on CPU: "
+                << e.what() << std::endl;
+        cv::ocl::setUseOpenCL(false);
+        compensator = make_exposure_compensator(false, exposure_mode);
+        std::cout << "[" << stage << "] exposure compensation retry, mode=" << exposure_mode << std::endl;
+        compensator->feed(corners, warped_imgs, warped_masks);
+    }
     std::cout << "[" << stage << "] exposure compensation done" << std::endl;
 
     std::cout << "[" << stage << "] seam finding begin..." << std::endl;
