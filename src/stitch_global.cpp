@@ -731,17 +731,83 @@ cv::Mat stitchInterStripsCustom(
     }
 
     const double canvas_area_mpx = static_cast<double>(canvas_w) * static_cast<double>(canvas_h) / 1e6;
-    const bool use_blocks_gain = tuning.use_blocks_gain && canvas_area_mpx <= 45.0;
-    std::cout << "[" << stage << "] exposure compensation begin, mode="
-            << (use_blocks_gain ? "GAIN_BLOCKS" : "GAIN")
+    cv::Ptr<cv::detail::ExposureCompensator> compensator;
+    std::string exposure_mode;
+    if (tuning.use_blocks_gain) {
+        const int block_size = canvas_area_mpx > 80.0 ? 96 : (canvas_area_mpx > 45.0 ? 64 : 32);
+        auto blocks_channels = cv::makePtr<cv::detail::BlocksChannelsCompensator>(block_size, block_size, 2);
+        blocks_channels->setNrGainsFilteringIterations(canvas_area_mpx > 45.0 ? 1 : 2);
+        blocks_channels->setSimilarityThreshold(0.85);
+        compensator = blocks_channels;
+        exposure_mode = "CHANNELS_BLOCKS";
+    } else {
+        auto channels = cv::makePtr<cv::detail::ChannelsCompensator>(2);
+        channels->setSimilarityThreshold(0.9);
+        compensator = channels;
+        exposure_mode = "CHANNELS";
+    }
+    std::cout << "[" << stage << "] exposure compensation begin, mode=" << exposure_mode
             << ", canvas_mpx=" << canvas_area_mpx << std::endl;
-    cv::Ptr<cv::detail::ExposureCompensator> compensator = use_blocks_gain
-                                                                ? cv::detail::ExposureCompensator::createDefault(
-                                                                    cv::detail::ExposureCompensator::GAIN_BLOCKS)
-                                                                : cv::detail::ExposureCompensator::createDefault(
-                                                                    cv::detail::ExposureCompensator::GAIN);
     compensator->feed(corners, warped_imgs, warped_masks);
     std::cout << "[" << stage << "] exposure compensation done" << std::endl;
+
+    std::cout << "[" << stage << "] seam finding begin..." << std::endl;
+    std::vector<cv::UMat> seam_masks(num_strips);
+    const double seam_target_mpx = 8.0;
+    const double seam_scale = std::min(
+        1.0,
+        std::sqrt((seam_target_mpx * 1e6) /
+                  (static_cast<double>(canvas_w) * static_cast<double>(canvas_h))));
+    std::cout << "[" << stage << "] seam scale=" << seam_scale << std::endl;
+
+    std::vector<cv::UMat> seam_images_f32(num_strips);
+    std::vector<cv::Point> seam_corners = corners;
+    if (seam_scale < 0.999) {
+        for (auto &p: seam_corners) {
+            p.x = cvRound(p.x * seam_scale);
+            p.y = cvRound(p.y * seam_scale);
+        }
+        for (int i = 0; i < num_strips; ++i) {
+            cv::Mat small_img;
+            cv::resize(warped_imgs[i], small_img, cv::Size(), seam_scale, seam_scale, cv::INTER_LINEAR_EXACT);
+            cv::Mat small_mask;
+            cv::resize(warped_masks[i], small_mask, small_img.size(), 0, 0, cv::INTER_NEAREST);
+            small_img.convertTo(seam_images_f32[i], CV_32F);
+            small_mask.copyTo(seam_masks[i]);
+        }
+    } else {
+        for (int i = 0; i < num_strips; ++i) {
+            seam_masks[i] = warped_masks[i].clone();
+            warped_imgs[i].convertTo(seam_images_f32[i], CV_32F);
+        }
+    }
+
+    try {
+        auto seam_finder = cv::makePtr<cv::detail::GraphCutSeamFinder>(
+            cv::detail::GraphCutSeamFinderBase::COST_COLOR_GRAD);
+        seam_finder->find(seam_images_f32, seam_corners, seam_masks);
+        std::cout << "[" << stage << "] seam finder: GraphCut(COLOR_GRAD)" << std::endl;
+    } catch (const cv::Exception &e) {
+        std::cerr << "[" << stage << "] seam finder GraphCut failed, fallback to DpSeamFinder: "
+                << e.what() << std::endl;
+        auto seam_finder = cv::makePtr<cv::detail::DpSeamFinder>(cv::detail::DpSeamFinder::COLOR_GRAD);
+        seam_finder->find(seam_images_f32, seam_corners, seam_masks);
+        std::cout << "[" << stage << "] seam finder: DpSeamFinder(COLOR_GRAD)" << std::endl;
+    }
+    seam_images_f32.clear();
+
+    if (seam_scale < 0.999) {
+        for (int i = 0; i < num_strips; ++i) {
+            cv::UMat seam_mask_full;
+            cv::resize(seam_masks[i], seam_mask_full, warped_masks[i].size(), 0, 0, cv::INTER_NEAREST);
+            cv::bitwise_and(seam_mask_full, warped_masks[i], seam_masks[i]);
+        }
+    } else {
+        for (int i = 0; i < num_strips; ++i) {
+            cv::bitwise_and(seam_masks[i], warped_masks[i], seam_masks[i]);
+        }
+    }
+    std::cout << "[" << stage << "] seam finding done" << std::endl;
 
     cv::Ptr<cv::detail::Blender> blender = cv::makePtr<cv::detail::MultiBandBlender>(
         tuning.try_gpu, std::max(1, tuning.blend_bands));
@@ -754,7 +820,14 @@ cv::Mat stitchInterStripsCustom(
 
         cv::UMat warped_16s;
         warped_imgs[i].convertTo(warped_16s, CV_16S);
-        blender->feed(warped_16s, warped_masks[i], corners[i]);
+
+        cv::UMat seam_dilated;
+        cv::dilate(seam_masks[i], seam_dilated, cv::Mat());
+        cv::UMat blend_mask;
+        cv::bitwise_and(seam_dilated, warped_masks[i], blend_mask);
+        cv::GaussianBlur(blend_mask, blend_mask, cv::Size(31, 31), 0.0, 0.0, cv::BORDER_DEFAULT);
+        cv::bitwise_and(blend_mask, warped_masks[i], blend_mask);
+        blender->feed(warped_16s, blend_mask, corners[i]);
         std::cout << "[" << stage << "]   blender feed " << (i + 1) << "/" << num_strips << std::endl;
     }
 

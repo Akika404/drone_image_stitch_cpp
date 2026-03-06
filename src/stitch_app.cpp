@@ -222,7 +222,7 @@ int runStitchApplication() {
 
     const std::string image_folder = "../images";
     const std::string image_type = "visible";
-    const std::string group = "minfull";
+    const std::string group = "full";
     const std::string pos_path = "../assets/pos.mti";
     const StitchTuning tuning = loadStitchTuning(image_type);
 
@@ -324,7 +324,7 @@ int runStitchApplication() {
             //     global_tuning.compositing_resol_mpx = 2.0;
             // }
 
-            global_tuning.blend_bands = std::min(global_tuning.blend_bands, 3);
+            global_tuning.blend_bands = std::max(global_tuning.blend_bands, 5);
             std::cout << "[Main] global-stage: strip_panoramas=" << strip_panoramas.size()
                     << ", sift=" << global_tuning.sift_features
                     << ", compose_mpx=" << global_tuning.compositing_resol_mpx
