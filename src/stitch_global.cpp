@@ -741,10 +741,11 @@ cv::Mat stitchInterStripsCustom(
     }
 
     const double canvas_area_mpx = static_cast<double>(canvas_w) * static_cast<double>(canvas_h) / 1e6;
-    const bool disable_opencl_for_large_canvas = canvas_area_mpx >= 120.0 && cv::ocl::useOpenCL();
-    if (disable_opencl_for_large_canvas) {
-        std::cout << "[" << stage << "] canvas is large (" << canvas_area_mpx
-                << " MP), disabling OpenCL for custom global compose" << std::endl;
+    const bool ocl_was_on = cv::ocl::useOpenCL();
+    if (ocl_was_on) {
+        std::cout << "[" << stage << "] disabling OpenCL for compose phase (canvas="
+                << canvas_area_mpx << " MP, strips=" << num_strips
+                << ") to avoid AGX compiled-variants limit" << std::endl;
         cv::ocl::setUseOpenCL(false);
     }
 
@@ -776,19 +777,7 @@ cv::Mat stitchInterStripsCustom(
         make_exposure_compensator(tuning.use_blocks_gain, exposure_mode);
     std::cout << "[" << stage << "] exposure compensation begin, mode=" << exposure_mode
             << ", canvas_mpx=" << canvas_area_mpx << std::endl;
-    try {
-        compensator->feed(corners, warped_imgs, warped_masks);
-    } catch (const cv::Exception &e) {
-        if (!looksLikeOpenClFailure(e) || disable_opencl_for_large_canvas) {
-            throw;
-        }
-        std::cerr << "[" << stage << "] exposure compensation OpenCL failure, retry on CPU: "
-                << e.what() << std::endl;
-        cv::ocl::setUseOpenCL(false);
-        compensator = make_exposure_compensator(false, exposure_mode);
-        std::cout << "[" << stage << "] exposure compensation retry, mode=" << exposure_mode << std::endl;
-        compensator->feed(corners, warped_imgs, warped_masks);
-    }
+    compensator->feed(corners, warped_imgs, warped_masks);
     std::cout << "[" << stage << "] exposure compensation done" << std::endl;
 
     std::cout << "[" << stage << "] seam finding begin..." << std::endl;
@@ -850,7 +839,7 @@ cv::Mat stitchInterStripsCustom(
     std::cout << "[" << stage << "] seam finding done" << std::endl;
 
     cv::Ptr<cv::detail::Blender> blender = cv::makePtr<cv::detail::MultiBandBlender>(
-        tuning.try_gpu, std::max(1, tuning.blend_bands));
+        false, std::max(1, tuning.blend_bands));
     blender->prepare(corners, sizes);
     std::cout << "[" << stage << "] blender prepared, blend_bands="
             << std::max(1, tuning.blend_bands) << std::endl;
@@ -880,5 +869,8 @@ cv::Mat stitchInterStripsCustom(
         std::chrono::steady_clock::now() - stage_start);
     std::cout << "[" << stage << "] panorama: " << result.cols << "x" << result.rows << std::endl;
     std::cout << "[" << stage << "] done in " << (elapsed.count() / 1000.0) << "s" << std::endl;
+    if (ocl_was_on) {
+        cv::ocl::setUseOpenCL(true);
+    }
     return result;
 }
