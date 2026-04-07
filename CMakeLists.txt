@@ -2,18 +2,20 @@ cmake_minimum_required(VERSION 3.10)
 project(drone_image_stitch_cpp)
 
 set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # MSVC: 源文件与执行字符集为 UTF-8，解决中文等 Unicode 字符编译问题
 if(MSVC)
     add_compile_options(/utf-8)
 endif()
 
-# like this: "C:/Users/StarFall/opencv/build"
-set(OPENCV_BUILD_PATH "你的opencv build路径")
+# 可选：手动指定 OpenCV cmake 配置目录（例如 /opt/homebrew/lib/cmake/opencv4）
+set(OPENCV_BUILD_PATH "" CACHE PATH "Optional OpenCV config directory")
+if(OPENCV_BUILD_PATH)
+    set(OpenCV_DIR "${OPENCV_BUILD_PATH}" CACHE PATH "OpenCV config directory" FORCE)
+endif()
 
-# OpenCV 安装路径 (可通过 -DOpenCV_DIR=... 覆盖，FORCE 确保 CLion 等 IDE 能正确使用)
-set(OpenCV_DIR "${OPENCV_BUILD_PATH}" CACHE PATH "OpenCV config directory" FORCE)
-find_package(OpenCV REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs features2d calib3d stitching)
 
 add_executable(drone_image_stitch_cpp
         src/main.cpp
@@ -23,9 +25,7 @@ add_executable(drone_image_stitch_cpp
         src/stitch_robust.cpp
         src/stitch_global.cpp
         src/image_loader.cpp
-        src/pos_record.cpp
-        src/pos_reader.cpp
-        src/pos_image_grouper.cpp
+        src/visual_flight_grouper.cpp
 )
 target_link_libraries(drone_image_stitch_cpp PRIVATE ${OpenCV_LIBS})
 

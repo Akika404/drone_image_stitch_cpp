@@ -287,352 +287,100 @@ namespace {
 
         return best;
     }
-}
 
-void orderStripGroupsByCrossTrack(std::vector<FlightStripGroup> &groups) {
-    if (groups.size() < 2) {
-        return;
-    }
-    std::vector<PosRecord> all_records;
-    for (const auto &g: groups) {
-        all_records.insert(all_records.end(), g.records.begin(), g.records.end());
-    }
-    const double axis_deg = averageFlightAxisHeading(all_records);
-    const double axis_rad = degreeToRadian(axis_deg);
-    const auto [base_lon, base_lat] = stripCentroidLonLat(groups.front().records);
-    const double lat_rad = degreeToRadian(base_lat);
-    constexpr double m_per_lat = 110540.0;
-    const double m_per_lon = 111320.0 * std::cos(lat_rad);
-    const double cross_e = -std::cos(axis_rad);
-    const double cross_n = std::sin(axis_rad);
+    void applyChannelGainInPlace(cv::UMat &image, const cv::Vec3d &gain) {
+        cv::Mat image_host;
+        image.copyTo(image_host);
 
-    std::vector<std::pair<double, int> > order;
-    for (int i = 0; i < static_cast<int>(groups.size()); i++) {
-        const auto [lon, lat] = stripCentroidLonLat(groups[i].records);
-        const double e = (lon - base_lon) * m_per_lon;
-        const double n = (lat - base_lat) * m_per_lat;
-        order.emplace_back(e * cross_e + n * cross_n, i);
-    }
-    std::ranges::sort(order);
-    std::vector<FlightStripGroup> sorted;
-    sorted.reserve(groups.size());
-    for (auto &[ct, idx]: order) {
-        (void) ct;
-        sorted.push_back(std::move(groups[idx]));
-    }
-    groups = std::move(sorted);
-}
-
-GlobalStitchInput buildGlobalStitchInput(
-    const std::vector<FlightStripGroup> &strip_groups,
-    const StitchTuning &tuning) {
-    double base_lat = 0.0;
-    double base_lon = 0.0;
-    for (const auto &g: strip_groups) {
-        if (!g.records.empty()) {
-            base_lat = g.records[0].latitude;
-            base_lon = g.records[0].longitude;
-            break;
+        cv::Mat image_f32;
+        image_host.convertTo(image_f32, CV_32F);
+        std::vector<cv::Mat> channels;
+        cv::split(image_f32, channels);
+        for (int c = 0; c < 3; ++c) {
+            channels[c] *= static_cast<float>(gain[c]);
         }
-    }
-    const double lat_rad = degreeToRadian(base_lat);
-    constexpr double m_per_lat = 110540.0;
-    const double m_per_lon = 111320.0 * std::cos(lat_rad);
-
-    struct ImgMeta {
-        int flat;
-        int strip;
-        int pos;
-        double x;
-        double y;
-    };
-    std::vector<ImgMeta> meta;
-    std::vector<cv::Mat> all_images;
-
-    for (int s = 0; s < static_cast<int>(strip_groups.size()); s++) {
-        for (int j = 0; j < static_cast<int>(strip_groups[s].images.size()); j++) {
-            ImgMeta m{};
-            m.flat = static_cast<int>(all_images.size());
-            m.strip = s;
-            m.pos = j;
-            m.x = 0.0;
-            m.y = 0.0;
-            if (j < static_cast<int>(strip_groups[s].records.size())) {
-                m.x = (strip_groups[s].records[j].longitude - base_lon) * m_per_lon;
-                m.y = (strip_groups[s].records[j].latitude - base_lat) * m_per_lat;
-            }
-            meta.push_back(m);
-            all_images.push_back(strip_groups[s].images[j]);
-        }
+        cv::merge(channels, image_f32);
+        image_f32.convertTo(image_host, CV_8U);
+        image_host.copyTo(image);
     }
 
-    const int n = static_cast<int>(all_images.size());
-    cv::Mat mask(n, n, CV_8U, cv::Scalar(0));
-    int within_pairs = 0;
-    int cross_pairs = 0;
-
-    for (int i = 0; i < n; i++) {
-        for (int j = i + 1; j < n; j++) {
-            if (meta[i].strip == meta[j].strip &&
-                std::abs(meta[i].pos - meta[j].pos) <= tuning.range_width) {
-                mask.at<uchar>(i, j) = 1;
-                mask.at<uchar>(j, i) = 1;
-                within_pairs++;
-            }
-        }
-    }
-
-    constexpr int cross_k = 4;
-    const int num_strips = static_cast<int>(strip_groups.size());
-    for (int s1 = 0; s1 < num_strips; s1++) {
-        for (int s2 = s1 + 1; s2 <= std::min(s1 + 2, num_strips - 1); s2++) {
-            for (const auto &m1: meta) {
-                if (m1.strip != s1) {
-                    continue;
-                }
-                std::vector<std::pair<double, int> > dists;
-                for (const auto &m2: meta) {
-                    if (m2.strip != s2) {
-                        continue;
-                    }
-                    const double dx = m1.x - m2.x;
-                    const double dy = m1.y - m2.y;
-                    dists.push_back({dx * dx + dy * dy, m2.flat});
-                }
-                std::ranges::sort(dists);
-                const int k = std::min(cross_k, static_cast<int>(dists.size()));
-                for (int ki = 0; ki < k; ki++) {
-                    const int j = dists[ki].second;
-                    if (!mask.at<uchar>(m1.flat, j)) {
-                        mask.at<uchar>(m1.flat, j) = 1;
-                        mask.at<uchar>(j, m1.flat) = 1;
-                        cross_pairs++;
-                    }
-                }
-            }
-        }
-    }
-
-    GlobalStitchInput result;
-    result.images = std::move(all_images);
-    mask.copyTo(result.match_mask);
-    result.num_within_pairs = within_pairs;
-    result.num_cross_pairs = cross_pairs;
-    return result;
-}
-
-cv::Mat stitchGlobalPipeline(
-    const std::vector<cv::Mat> &images,
-    const cv::UMat &match_mask,
-    const StitchTuning &tuning) {
-    const std::string stage = "Global";
-    const int N = static_cast<int>(images.size());
-    if (N < 2) {
-        throw std::runtime_error("[" + stage + "] need >= 2 images");
-    }
-
-    const double full_area = static_cast<double>(images[0].size().area());
-    const double work_scale = std::min(1.0, std::sqrt(tuning.registration_resol_mpx * 1e6 / full_area));
-    const double seam_scale = std::min(1.0, std::sqrt(tuning.seam_estimation_resol_mpx * 1e6 / full_area));
-    const double compose_scale = (tuning.compositing_resol_mpx > 0)
-                                     ? std::min(1.0, std::sqrt(tuning.compositing_resol_mpx * 1e6 / full_area))
-                                     : 1.0;
-    const double seam_work_aspect = seam_scale / work_scale;
-    const double compose_work_aspect = compose_scale / work_scale;
-    std::cout << "[" << stage << "] scale: work=" << work_scale
-            << " seam=" << seam_scale << " compose=" << compose_scale << std::endl;
-
-    std::cout << "[" << stage << "] detecting features (" << N << " images)..." << std::endl;
-    cv::Ptr<cv::Feature2D> finder = cv::SIFT::create(tuning.sift_features);
-    std::vector<cv::detail::ImageFeatures> features(N);
-    std::vector<cv::Size> full_sizes(N);
-    for (int i = 0; i < N; i++) {
-        full_sizes[i] = images[i].size();
-        cv::Mat work_img;
-        cv::resize(images[i], work_img, cv::Size(), work_scale, work_scale, cv::INTER_LINEAR_EXACT);
-        cv::detail::computeImageFeatures(finder, work_img, features[i]);
-        features[i].img_idx = i;
-        if ((i + 1) % 20 == 0 || i == N - 1) {
-            std::cout << "[" << stage << "]   features: " << (i + 1) << "/" << N << std::endl;
-        }
-    }
-
-    std::cout << "[" << stage << "] matching features (masked)..." << std::endl;
-    cv::Ptr<cv::detail::FeaturesMatcher> matcher =
-            cv::makePtr<cv::detail::BestOf2NearestMatcher>(tuning.try_gpu, tuning.match_conf);
-    std::vector<cv::detail::MatchesInfo> pairwise_matches;
-    (*matcher)(features, pairwise_matches, match_mask);
-    matcher->collectGarbage();
-
-    std::vector<int> indices = cv::detail::leaveBiggestComponent(
-        features, pairwise_matches, tuning.pano_conf_thresh);
-    const int num = static_cast<int>(indices.size());
-    std::cout << "[" << stage << "] connected component: " << num << "/" << N << " images" << std::endl;
-    if (num < 2) {
-        throw std::runtime_error("[" + stage + "] only " + std::to_string(num) + " connected images");
-    }
-
-    std::vector<cv::Mat> imgs(num);
-    std::vector<cv::Size> sizes_full(num);
-    for (int i = 0; i < num; i++) {
-        imgs[i] = images[indices[i]];
-        sizes_full[i] = full_sizes[indices[i]];
-    }
-
-    std::cout << "[" << stage << "] camera estimation (affine)..." << std::endl;
-    std::vector<cv::detail::CameraParams> cameras;
-    if (!cv::detail::AffineBasedEstimator()(features, pairwise_matches, cameras)) {
-        throw std::runtime_error("[" + stage + "] camera estimation failed");
-    }
-    for (auto &c: cameras) {
-        c.R.convertTo(c.R, CV_32F);
-    }
-
-    std::cout << "[" << stage << "] bundle adjustment..." << std::endl;
-    {
-        auto ba = cv::makePtr<cv::detail::BundleAdjusterAffinePartial>();
-        ba->setConfThresh(tuning.pano_conf_thresh);
-        if (!(*ba)(features, pairwise_matches, cameras)) {
-            std::cerr << "[" << stage << "] WARNING: bundle adjustment did not converge, "
-                    << "using initial camera estimates" << std::endl;
-        }
-    }
-
-    std::vector<double> focals;
-    focals.reserve(cameras.size());
-    for (const auto &c: cameras) {
-        focals.push_back(c.focal);
-    }
-    std::ranges::sort(focals);
-    const auto warped_scale = static_cast<float>(focals[focals.size() / 2]);
-
-    std::cout << "[" << stage << "] warping at seam resolution (" << num << " images)..." << std::endl;
-    cv::Ptr<cv::WarperCreator> wc = tuning.use_affine_warper
-                                        ? static_cast<cv::Ptr<cv::WarperCreator>>(cv::makePtr<cv::AffineWarper>())
-                                        : static_cast<cv::Ptr<cv::WarperCreator>>(cv::makePtr<cv::PlaneWarper>());
-    auto seam_warper = wc->create(warped_scale * static_cast<float>(seam_work_aspect));
-
-    std::vector<cv::UMat> imgs_seam(num);
-    std::vector<cv::UMat> masks_seam(num);
-    std::vector<cv::Point> corners_seam(num);
-    std::vector<cv::Size> sizes_seam(num);
-
-    for (int i = 0; i < num; i++) {
-        cv::Mat sm;
-        cv::resize(imgs[i], sm, cv::Size(), seam_scale, seam_scale, cv::INTER_LINEAR_EXACT);
-        cv::Mat_<float> K;
-        cameras[i].K().convertTo(K, CV_32F);
-        const auto swa = static_cast<float>(seam_work_aspect);
-        K(0, 0) *= swa;
-        K(0, 2) *= swa;
-        K(1, 1) *= swa;
-        K(1, 2) *= swa;
-        corners_seam[i] = seam_warper->warp(
-            sm, K, cameras[i].R, cv::INTER_LINEAR, cv::BORDER_REFLECT, imgs_seam[i]);
-        sizes_seam[i] = imgs_seam[i].size();
-        cv::Mat m(sm.size(), CV_8U, cv::Scalar(255));
-        seam_warper->warp(m, K, cameras[i].R, cv::INTER_NEAREST, cv::BORDER_CONSTANT, masks_seam[i]);
-    }
-
-    std::cout << "[" << stage << "] exposure compensation..." << std::endl;
-    cv::Ptr<cv::detail::ExposureCompensator> comp = tuning.use_blocks_gain
-                                                        ? cv::detail::ExposureCompensator::createDefault(
-                                                            cv::detail::ExposureCompensator::GAIN_BLOCKS)
-                                                        : cv::detail::ExposureCompensator::createDefault(
-                                                            cv::detail::ExposureCompensator::GAIN);
-    comp->feed(corners_seam, imgs_seam, masks_seam);
-
-    std::cout << "[" << stage << "] seam finding..." << std::endl;
-    {
-        std::vector<cv::UMat> imgs_f(num);
-        for (int i = 0; i < num; i++) {
-            imgs_seam[i].convertTo(imgs_f[i], CV_32F);
-        }
-        auto sf = cv::makePtr<cv::detail::DpSeamFinder>(cv::detail::DpSeamFinder::COLOR_GRAD);
-        sf->find(imgs_f, corners_seam, masks_seam);
-    }
-    imgs_seam.clear();
-
-    std::cout << "[" << stage << "] compositing at full resolution (" << num << " images)..." << std::endl;
-    auto comp_warper = wc->create(warped_scale * static_cast<float>(compose_work_aspect));
-
-    std::vector<cv::Point> corners_c(num);
-    std::vector<cv::Size> sizes_c(num);
-    for (int i = 0; i < num; i++) {
-        cv::Mat_<float> K;
-        cameras[i].K().convertTo(K, CV_32F);
-        const auto cwa = static_cast<float>(compose_work_aspect);
-        K(0, 0) *= cwa;
-        K(0, 2) *= cwa;
-        K(1, 1) *= cwa;
-        K(1, 2) *= cwa;
-        cv::Size sz = sizes_full[i];
-        if (std::abs(compose_scale - 1.0) > 0.1) {
-            sz.width = cvRound(sz.width * compose_scale);
-            sz.height = cvRound(sz.height * compose_scale);
-        }
-        const cv::Rect roi = comp_warper->warpRoi(sz, K, cameras[i].R);
-        corners_c[i] = roi.tl();
-        sizes_c[i] = roi.size();
-    }
-
-    cv::Ptr<cv::detail::Blender> blender = cv::makePtr<
-        cv::detail::MultiBandBlender>(tuning.try_gpu, tuning.blend_bands);
-    blender->prepare(corners_c, sizes_c);
-
-    for (int i = 0; i < num; i++) {
-        cv::Mat ci;
-        if (std::abs(compose_scale - 1.0) > 0.1) {
-            cv::resize(imgs[i], ci, cv::Size(), compose_scale, compose_scale, cv::INTER_LINEAR_EXACT);
-        } else {
-            ci = imgs[i];
+    cv::Ptr<cv::detail::ExposureCompensator> makeSafeExposureCompensator(
+        const double canvas_area_mpx,
+        std::string &mode_out) {
+        if (canvas_area_mpx < 0.0) {
+            mode_out = "NO";
+            return cv::detail::ExposureCompensator::createDefault(cv::detail::ExposureCompensator::NO);
         }
 
-        cv::Mat_<float> K;
-        cameras[i].K().convertTo(K, CV_32F);
-        const auto cwa = static_cast<float>(compose_work_aspect);
-        K(0, 0) *= cwa;
-        K(0, 2) *= cwa;
-        K(1, 1) *= cwa;
-        K(1, 2) *= cwa;
-
-        cv::UMat iw;
-        comp_warper->warp(ci, K, cameras[i].R, cv::INTER_LINEAR, cv::BORDER_REFLECT, iw);
-
-        cv::UMat mw;
-        {
-            cv::Mat fm(ci.size(), CV_8U, cv::Scalar(255));
-            comp_warper->warp(fm, K, cameras[i].R, cv::INTER_NEAREST, cv::BORDER_CONSTANT, mw);
+        if (canvas_area_mpx <= 120.0) {
+            auto channels = cv::makePtr<cv::detail::ChannelsCompensator>(2);
+            channels->setSimilarityThreshold(0.95);
+            mode_out = "CHANNELS";
+            return channels;
         }
 
-        comp->apply(i, corners_c[i], iw, mw);
-
-        cv::UMat iw_s;
-        iw.convertTo(iw_s, CV_16S);
-        iw.release();
-
-        cv::UMat sd;
-        cv::UMat sr;
-        cv::dilate(masks_seam[i], sd, cv::Mat());
-        cv::resize(sd, sr, mw.size(), 0, 0, cv::INTER_LINEAR_EXACT);
-
-        cv::UMat cm;
-        cv::bitwise_and(sr, mw, cm);
-
-        blender->feed(iw_s, cm, corners_c[i]);
-
-        if ((i + 1) % 10 == 0 || i == num - 1) {
-            std::cout << "[" << stage << "]   composed " << (i + 1) << "/" << num << std::endl;
-        }
+        auto gain = cv::makePtr<cv::detail::GainCompensator>(1);
+        gain->setSimilarityThreshold(0.95);
+        mode_out = "GAIN";
+        return gain;
     }
 
-    std::cout << "[" << stage << "] blending..." << std::endl;
-    cv::Mat result;
-    cv::Mat result_mask;
-    blender->blend(result, result_mask);
-    result.convertTo(result, CV_8U);
-    std::cout << "[" << stage << "] panorama: " << result.cols << "x" << result.rows << std::endl;
-    return result;
+    void ensureBinaryMask(cv::UMat &mask) {
+        cv::threshold(mask, mask, 1.0, 255.0, cv::THRESH_BINARY);
+    }
+
+    cv::UMat buildSoftBlendMask(const cv::UMat &seam_mask, const cv::UMat &content_mask) {
+        cv::UMat binary_mask;
+        cv::bitwise_and(seam_mask, content_mask, binary_mask);
+        ensureBinaryMask(binary_mask);
+
+        cv::Mat binary_host;
+        binary_mask.copyTo(binary_host);
+
+        cv::Mat binary_f32;
+        binary_host.convertTo(binary_f32, CV_32F, 1.0 / 255.0);
+
+        cv::Mat soft_f32;
+        // Feather the seam transition a bit so strip boundaries do not remain as hard lines.
+        cv::GaussianBlur(binary_f32, soft_f32, cv::Size(0, 0), 10.0, 10.0, cv::BORDER_REPLICATE);
+        cv::multiply(soft_f32, binary_f32, soft_f32);
+
+        cv::Mat soft_u8;
+        soft_f32.convertTo(soft_u8, CV_8U, 255.0);
+        return soft_u8.getUMat(cv::ACCESS_READ);
+    }
+
+    cv::Mat buildWarpedContentMask(
+        const cv::Mat &src_image,
+        const cv::Mat &affine,
+        const cv::Size &dst_size) {
+        cv::Mat gray;
+        cv::cvtColor(src_image, gray, cv::COLOR_BGR2GRAY);
+
+        cv::Mat content_mask_u8;
+        // Strip panoramas may still contain black background wedges after rectangular cropping.
+        // Treat only non-black source pixels as valid so those holes are excluded in global blending.
+        cv::threshold(gray, content_mask_u8, 3, 255, cv::THRESH_BINARY);
+
+        cv::Mat content_mask_f32;
+        content_mask_u8.convertTo(content_mask_f32, CV_32F, 1.0 / 255.0);
+
+        cv::Mat warped_content_f32;
+        cv::warpAffine(
+            content_mask_f32,
+            warped_content_f32,
+            affine,
+            dst_size,
+            cv::INTER_LINEAR,
+            cv::BORDER_CONSTANT,
+            cv::Scalar(0.0f));
+
+        cv::Mat mask_warped;
+        // Only keep pixels whose bilinear footprint comes entirely from valid source content.
+        cv::threshold(warped_content_f32, mask_warped, 0.999f, 255.0, cv::THRESH_BINARY);
+        mask_warped.convertTo(mask_warped, CV_8U);
+        return mask_warped;
+    }
 }
 
 cv::Mat stitchInterStripsCustom(
@@ -730,10 +478,7 @@ cv::Mat stitchInterStripsCustom(
         cv::Mat warped;
         cv::warpAffine(
             oriented[i], warped, affine, sizes[i], cv::INTER_LINEAR, cv::BORDER_CONSTANT);
-        cv::Mat mask_src(oriented[i].size(), CV_8U, cv::Scalar(255));
-        cv::Mat mask_warped;
-        cv::warpAffine(
-            mask_src, mask_warped, affine, sizes[i], cv::INTER_NEAREST, cv::BORDER_CONSTANT);
+        cv::Mat mask_warped = buildWarpedContentMask(oriented[i], affine, sizes[i]);
 
         warped.copyTo(warped_imgs[i]);
         mask_warped.copyTo(warped_masks[i]);
@@ -749,32 +494,87 @@ cv::Mat stitchInterStripsCustom(
         cv::ocl::setUseOpenCL(false);
     }
 
-    auto make_exposure_compensator = [&](const bool prefer_blocks, std::string &mode_out) {
-        cv::Ptr<cv::detail::ExposureCompensator> local_compensator;
-        if (prefer_blocks && canvas_area_mpx <= 120.0) {
-            const int block_size = canvas_area_mpx > 80.0 ? 96 : (canvas_area_mpx > 45.0 ? 64 : 32);
-            auto blocks_channels = cv::makePtr<cv::detail::BlocksChannelsCompensator>(block_size, block_size, 2);
-            blocks_channels->setNrGainsFilteringIterations(canvas_area_mpx > 45.0 ? 1 : 2);
-            blocks_channels->setSimilarityThreshold(0.85);
-            local_compensator = blocks_channels;
-            mode_out = "CHANNELS_BLOCKS";
-        } else if (canvas_area_mpx <= 180.0) {
-            auto channels = cv::makePtr<cv::detail::ChannelsCompensator>(2);
-            channels->setSimilarityThreshold(0.9);
-            local_compensator = channels;
-            mode_out = "CHANNELS";
-        } else {
-            auto gain = cv::makePtr<cv::detail::GainCompensator>(1);
-            gain->setSimilarityThreshold(0.9);
-            local_compensator = gain;
-            mode_out = "GAIN";
+    std::cout << "[" << stage << "] pre-equalizing strip radiometry..." << std::endl;
+    {
+        std::vector<cv::Vec3d> cum_gain(num_strips, cv::Vec3d(1.0, 1.0, 1.0));
+        for (int i = 1; i < num_strips; ++i) {
+            const cv::Rect rect_prev(corners[i - 1],
+                cv::Size(warped_imgs[i - 1].cols, warped_imgs[i - 1].rows));
+            const cv::Rect rect_curr(corners[i],
+                cv::Size(warped_imgs[i].cols, warped_imgs[i].rows));
+            cv::Rect overlap = rect_prev & rect_curr;
+
+            if (overlap.area() < 100) {
+                cum_gain[i] = cum_gain[i - 1];
+                std::cout << "[" << stage << "]   strips " << (i - 1) << "->" << i
+                        << " no overlap, inheriting previous gain" << std::endl;
+                continue;
+            }
+
+            cv::Rect local_prev(overlap.tl() - corners[i - 1], overlap.size());
+            cv::Rect local_curr(overlap.tl() - corners[i], overlap.size());
+            local_prev &= cv::Rect(0, 0, warped_imgs[i - 1].cols, warped_imgs[i - 1].rows);
+            local_curr &= cv::Rect(0, 0, warped_imgs[i].cols, warped_imgs[i].rows);
+            const int w = std::min(local_prev.width, local_curr.width);
+            const int h = std::min(local_prev.height, local_curr.height);
+            if (w < 10 || h < 10) { cum_gain[i] = cum_gain[i - 1]; continue; }
+            local_prev.width = w; local_prev.height = h;
+            local_curr.width = w; local_curr.height = h;
+
+            cv::Mat mask_prev_m, mask_curr_m, combined_mask;
+            warped_masks[i - 1](local_prev).copyTo(mask_prev_m);
+            warped_masks[i](local_curr).copyTo(mask_curr_m);
+            cv::bitwise_and(mask_prev_m, mask_curr_m, combined_mask);
+            const int valid_px = cv::countNonZero(combined_mask);
+            if (valid_px < 1000) { cum_gain[i] = cum_gain[i - 1]; continue; }
+
+            cv::Mat img_prev_m, img_curr_m;
+            warped_imgs[i - 1](local_prev).copyTo(img_prev_m);
+            warped_imgs[i](local_curr).copyTo(img_curr_m);
+            const cv::Scalar mean_prev = cv::mean(img_prev_m, combined_mask);
+            const cv::Scalar mean_curr = cv::mean(img_curr_m, combined_mask);
+
+            cv::Vec3d pw_gain(1.0, 1.0, 1.0);
+            for (int c = 0; c < 3; ++c) {
+                if (mean_curr[c] > 5.0 && mean_prev[c] > 5.0)
+                    pw_gain[c] = std::clamp(mean_prev[c] / mean_curr[c], 0.80, 1.25);
+            }
+            for (int c = 0; c < 3; ++c)
+                cum_gain[i][c] = cum_gain[i - 1][c] * pw_gain[c];
+
+            std::cout << "[" << stage << "]   strip " << i
+                    << " pw_gain=[" << pw_gain[0] << "," << pw_gain[1] << "," << pw_gain[2] << "]"
+                    << " cum=[" << cum_gain[i][0] << "," << cum_gain[i][1] << "," << cum_gain[i][2] << "]"
+                    << " overlap=" << valid_px << "px" << std::endl;
         }
-        return local_compensator;
-    };
+
+        cv::Vec3d geo_mean(1.0, 1.0, 1.0);
+        for (int i = 0; i < num_strips; ++i)
+            for (int c = 0; c < 3; ++c)
+                geo_mean[c] *= cum_gain[i][c];
+        for (int c = 0; c < 3; ++c)
+            geo_mean[c] = std::pow(geo_mean[c], 1.0 / num_strips);
+
+        for (int i = 0; i < num_strips; ++i) {
+            for (int c = 0; c < 3; ++c)
+                if (geo_mean[c] > 0.01) cum_gain[i][c] /= geo_mean[c];
+
+            const cv::Vec3d &g = cum_gain[i];
+            if (std::abs(g[0] - 1.0) < 0.02 && std::abs(g[1] - 1.0) < 0.02 &&
+                std::abs(g[2] - 1.0) < 0.02)
+                continue;
+
+            applyChannelGainInPlace(warped_imgs[i], g);
+
+            std::cout << "[" << stage << "]   applied radiometric gain to strip " << i
+                    << ": [" << g[0] << "," << g[1] << "," << g[2] << "]" << std::endl;
+        }
+    }
+    std::cout << "[" << stage << "] pre-equalization done" << std::endl;
 
     std::string exposure_mode;
     cv::Ptr<cv::detail::ExposureCompensator> compensator =
-        make_exposure_compensator(tuning.use_blocks_gain, exposure_mode);
+        makeSafeExposureCompensator(canvas_area_mpx, exposure_mode);
     std::cout << "[" << stage << "] exposure compensation begin, mode=" << exposure_mode
             << ", canvas_mpx=" << canvas_area_mpx << std::endl;
     compensator->feed(corners, warped_imgs, warped_masks);
@@ -803,10 +603,12 @@ cv::Mat stitchInterStripsCustom(
             cv::resize(warped_masks[i], small_mask, small_img.size(), 0, 0, cv::INTER_NEAREST);
             small_img.convertTo(seam_images_f32[i], CV_32F);
             small_mask.copyTo(seam_masks[i]);
+            ensureBinaryMask(seam_masks[i]);
         }
     } else {
         for (int i = 0; i < num_strips; ++i) {
             seam_masks[i] = warped_masks[i].clone();
+            ensureBinaryMask(seam_masks[i]);
             warped_imgs[i].convertTo(seam_images_f32[i], CV_32F);
         }
     }
@@ -825,24 +627,18 @@ cv::Mat stitchInterStripsCustom(
     }
     seam_images_f32.clear();
 
-    if (seam_scale < 0.999) {
-        for (int i = 0; i < num_strips; ++i) {
-            cv::UMat seam_mask_full;
-            cv::resize(seam_masks[i], seam_mask_full, warped_masks[i].size(), 0, 0, cv::INTER_NEAREST);
-            cv::bitwise_and(seam_mask_full, warped_masks[i], seam_masks[i]);
-        }
-    } else {
-        for (int i = 0; i < num_strips; ++i) {
-            cv::bitwise_and(seam_masks[i], warped_masks[i], seam_masks[i]);
-        }
-    }
     std::cout << "[" << stage << "] seam finding done" << std::endl;
 
+    const int auto_blend_bands = std::min(12,
+        static_cast<int>(std::ceil(std::log2(
+            static_cast<double>(std::max(canvas_w, canvas_h))))) - 1);
+    const int final_blend_bands = std::max(std::max(5, tuning.blend_bands), auto_blend_bands);
     cv::Ptr<cv::detail::Blender> blender = cv::makePtr<cv::detail::MultiBandBlender>(
-        false, std::max(1, tuning.blend_bands));
+        false, final_blend_bands);
     blender->prepare(corners, sizes);
     std::cout << "[" << stage << "] blender prepared, blend_bands="
-            << std::max(1, tuning.blend_bands) << std::endl;
+            << final_blend_bands << " (config=" << tuning.blend_bands
+            << ", auto=" << auto_blend_bands << ")" << std::endl;
 
     for (int i = 0; i < num_strips; ++i) {
         compensator->apply(i, corners[i], warped_imgs[i], warped_masks[i]);
@@ -850,12 +646,15 @@ cv::Mat stitchInterStripsCustom(
         cv::UMat warped_16s;
         warped_imgs[i].convertTo(warped_16s, CV_16S);
 
-        cv::UMat seam_dilated;
-        cv::dilate(seam_masks[i], seam_dilated, cv::Mat());
         cv::UMat blend_mask;
-        cv::bitwise_and(seam_dilated, warped_masks[i], blend_mask);
-        cv::GaussianBlur(blend_mask, blend_mask, cv::Size(31, 31), 0.0, 0.0, cv::BORDER_DEFAULT);
-        cv::bitwise_and(blend_mask, warped_masks[i], blend_mask);
+        if (seam_scale < 0.999) {
+            cv::resize(seam_masks[i], blend_mask, warped_masks[i].size(), 0, 0, cv::INTER_NEAREST);
+        } else {
+            blend_mask = seam_masks[i];
+        }
+        ensureBinaryMask(blend_mask);
+        blend_mask = buildSoftBlendMask(blend_mask, warped_masks[i]);
+
         blender->feed(warped_16s, blend_mask, corners[i]);
         std::cout << "[" << stage << "]   blender feed " << (i + 1) << "/" << num_strips << std::endl;
     }

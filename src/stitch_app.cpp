@@ -15,12 +15,11 @@
 #include <vector>
 
 #include "image_loader.hpp"
-#include "pos_image_grouper.hpp"
-#include "pos_reader.hpp"
 #include "stitch_common.hpp"
 #include "stitch_config.hpp"
 #include "stitch_global.hpp"
 #include "stitch_robust.hpp"
+#include "visual_flight_grouper.hpp"
 
 namespace fs = std::filesystem;
 
@@ -114,14 +113,14 @@ namespace {
     }
 
     void flattenStripGroups(
-        const std::vector<FlightStripGroup> &strip_groups,
+        const std::vector<VisualStripGroup> &strip_groups,
         std::vector<cv::Mat> &all_images,
         std::vector<std::string> &all_tags) {
         for (size_t i = 0; i < strip_groups.size(); ++i) {
             for (size_t j = 0; j < strip_groups[i].images.size(); ++j) {
                 all_images.push_back(strip_groups[i].images[j]);
-                if (j < strip_groups[i].records.size() && !strip_groups[i].records[j].file_id.empty()) {
-                    all_tags.push_back(strip_groups[i].records[j].file_id);
+                if (j < strip_groups[i].image_ids.size() && !strip_groups[i].image_ids[j].empty()) {
+                    all_tags.push_back(strip_groups[i].image_ids[j]);
                 } else {
                     all_tags.push_back("img#" + std::to_string(all_images.size() - 1));
                 }
@@ -129,90 +128,17 @@ namespace {
         }
     }
 
-    std::vector<std::string> makeStripTags(const FlightStripGroup &group) {
+    std::vector<std::string> makeStripTags(const VisualStripGroup &group) {
         std::vector<std::string> tags;
         tags.reserve(group.images.size());
         for (size_t i = 0; i < group.images.size(); ++i) {
-            if (i < group.records.size() && !group.records[i].file_id.empty()) {
-                tags.push_back(group.records[i].file_id);
+            if (i < group.image_ids.size() && !group.image_ids[i].empty()) {
+                tags.push_back(group.image_ids[i]);
             } else {
                 tags.push_back("img#" + std::to_string(i));
             }
         }
         return tags;
-    }
-
-    void removeRedundantImages(FlightStripGroup &group) {
-        if (group.records.size() != group.images.size() || group.records.size() < 2) {
-            return;
-        }
-
-        const double R = 6378137.0; // Earth radius in meters
-        const double to_rad = CV_PI / 180.0;
-        
-        std::vector<double> dists;
-        dists.reserve(group.records.size() - 1);
-
-        for (size_t i = 0; i < group.records.size() - 1; ++i) {
-            const auto &p1 = group.records[i];
-            const auto &p2 = group.records[i+1];
-
-            const double dlat = (p2.latitude - p1.latitude) * to_rad;
-            const double dlon = (p2.longitude - p1.longitude) * to_rad;
-            const double lat_avg = (p1.latitude + p2.latitude) / 2.0 * to_rad;
-
-            const double x = dlon * std::cos(lat_avg);
-            const double y = dlat;
-            double d = std::sqrt(x*x + y*y) * R;
-            dists.push_back(d);
-        }
-
-        std::vector<double> sorted_dists = dists;
-        std::ranges::sort(sorted_dists);
-        double median_dist = 0;
-        if (!sorted_dists.empty()) {
-            median_dist = sorted_dists[sorted_dists.size() / 2];
-        }
-
-        if (median_dist < 1.0) {
-             return;
-        }
-
-        double threshold = median_dist * 0.3; 
-        
-        std::vector<cv::Mat> new_images;
-        std::vector<PosRecord> new_records;
-        new_images.reserve(group.images.size());
-        new_records.reserve(group.records.size());
-        
-        new_images.push_back(group.images[0]);
-        new_records.push_back(group.records[0]);
-
-        int removed_count = 0;
-        for (size_t i = 1; i < group.records.size(); ++i) {
-             const auto &p1 = new_records.back(); 
-             const auto &p2 = group.records[i];
-
-             const double dlat = (p2.latitude - p1.latitude) * to_rad;
-             const double dlon = (p2.longitude - p1.longitude) * to_rad;
-             const double lat_avg = (p1.latitude + p2.latitude) / 2.0 * to_rad;
-             const double x = dlon * std::cos(lat_avg);
-             const double y = dlat;
-             const double d = std::sqrt(x*x + y*y) * R;
-
-             if (d >= threshold) {
-                 new_images.push_back(group.images[i]);
-                 new_records.push_back(group.records[i]);
-             } else {
-                 removed_count++;
-             }
-        }
-
-        if (removed_count > 0) {
-            std::cout << "[Main] Filtered " << removed_count << " redundant images (hovering/overlapping) from strip." << std::endl;
-            group.images = new_images;
-            group.records = new_records;
-        }
     }
 
 } // namespace
@@ -222,11 +148,8 @@ int runStitchApplication() {
 
     const std::string image_folder = "../images";
     const std::string image_type = "visible";
-    const std::string group = "full";
-    const std::string pos_path = "../assets/pos.mti";
+    const std::string group = "minfull";
     const StitchTuning tuning = loadStitchTuning(image_type);
-
-    const bool use_pos = true;
 
     const std::string input_folder = image_folder + "/" + image_type + "/" + group;
     const std::string output_folder = "../output/" + image_type + "/" + group;
@@ -238,7 +161,7 @@ int runStitchApplication() {
 
     try {
         std::cout << "[Main] input dir: " << input_folder << std::endl;
-        std::cout << "[Main] POS: " << (use_pos ? "enabled" : "disabled") << std::endl;
+        std::cout << "[Main] stitch mode: visual-only (no POS / no EXIF geo)" << std::endl;
         std::cout << "[Main] output: " << output_path << std::endl;
         logRuntimeOptions(tuning);
 
@@ -255,23 +178,14 @@ int runStitchApplication() {
                     << "': no camera_id entry in tuning.calibration.cameras" << std::endl;
         }
 
-        std::vector<FlightStripGroup> strip_groups;
-        if (use_pos) {
-            std::cout << "[Main] POS file: " << pos_path << std::endl;
-            const auto pos_records = PosReader::load(pos_path);
-            strip_groups = PosBasedImageGrouper::groupWithRecords(images, ids, pos_records);
-            if (strip_groups.empty()) {
-                throw std::runtime_error("POS grouping empty, check POS file and image IDs");
-            }
-        } else {
-            strip_groups.push_back({images, {}});
-            std::cout << "[Main] POS disabled, all images as single group" << std::endl;
+        auto strip_groups = VisualFlightGrouper::groupBoustrophedon(images, ids, tuning);
+        if (strip_groups.empty()) {
+            throw std::runtime_error("visual grouping produced no valid strips");
         }
 
         cv::Mat panorama;
-        if (use_pos && strip_groups.size() > 1) {
-            std::cout << "[Main] multi-strip mode, ordering by cross-track position..." << std::endl;
-            orderStripGroupsByCrossTrack(strip_groups);
+        if (strip_groups.size() > 1) {
+            std::cout << "[Main] multi-strip mode, preserving visual flight order..." << std::endl;
             for (size_t i = 0; i < strip_groups.size(); ++i) {
                 std::cout << "[Main]   strip " << i << ": " << strip_groups[i].images.size() << " images" << std::endl;
             }
@@ -286,8 +200,6 @@ int runStitchApplication() {
                 ? tuning.strip_sift_features
                 : tuning.sift_features;
             for (size_t si = 0; si < strip_groups.size(); ++si) {
-                // 偏航照片过滤
-                removeRedundantImages(strip_groups[si]);
                 std::cout << "[Main] strip-stage: stitching strip " << si
                         << " (" << strip_groups[si].images.size() << " images)..." << std::endl;
                 auto strip_tags = makeStripTags(strip_groups[si]);
