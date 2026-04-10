@@ -5,12 +5,16 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 namespace {
-    struct ConsecutiveRelation {
+    struct VisualRelation {
+        size_t left_index = 0;
+        size_t right_index = 0;
+        int gap = 1;
         bool ok = false;
         size_t kp_left = 0;
         size_t kp_right = 0;
@@ -29,11 +33,15 @@ namespace {
         bool dominant_horizontal = true;
         double median_main = 0.0;
         double median_cross = 0.0;
+        double median_pair_score = 0.0;
         double stable_min_main = 0.0;
         double stable_max_cross = 0.0;
         double duplicate_max_main = 0.0;
         double duplicate_max_cross = 0.0;
     };
+
+    constexpr size_t kMaxNeighborGap = 3;
+    constexpr size_t kMinSegmentImages = 2;
 
     double medianOf(std::vector<double> values) {
         if (values.empty()) {
@@ -77,11 +85,15 @@ namespace {
         return h;
     }
 
-    ConsecutiveRelation estimateRelation(
+    double gapWeight(const int gap) {
+        return 1.0 / std::sqrt(static_cast<double>(std::max(1, gap)));
+    }
+
+    VisualRelation estimateRelation(
         const cv::Mat &left,
         const cv::Mat &right,
         const StitchTuning &tuning) {
-        ConsecutiveRelation relation;
+        VisualRelation relation;
         if (left.empty() || right.empty()) {
             return relation;
         }
@@ -203,16 +215,36 @@ namespace {
         return relation;
     }
 
-    MotionStats summarizeMotion(const std::vector<ConsecutiveRelation> &relations) {
+    const VisualRelation *findRelation(
+        const std::vector<std::vector<VisualRelation> > &graph,
+        const size_t left,
+        const size_t right) {
+        if (left >= graph.size()) {
+            return nullptr;
+        }
+        for (const auto &relation: graph[left]) {
+            if (relation.right_index == right) {
+                return &relation;
+            }
+        }
+        return nullptr;
+    }
+
+    MotionStats summarizeMotion(const std::vector<std::vector<VisualRelation> > &graph) {
         MotionStats stats;
         std::vector<double> abs_tx;
         std::vector<double> abs_ty;
-        for (const auto &relation: relations) {
-            if (!relation.ok) {
-                continue;
+        std::vector<double> pair_scores;
+
+        for (const auto &edges: graph) {
+            for (const auto &relation: edges) {
+                if (!relation.ok) {
+                    continue;
+                }
+                abs_tx.push_back(std::abs(relation.tx) / static_cast<double>(relation.gap));
+                abs_ty.push_back(std::abs(relation.ty) / static_cast<double>(relation.gap));
+                pair_scores.push_back(relation.score * gapWeight(relation.gap));
             }
-            abs_tx.push_back(std::abs(relation.tx));
-            abs_ty.push_back(std::abs(relation.ty));
         }
 
         if (abs_tx.size() < 2) {
@@ -221,81 +253,219 @@ namespace {
 
         stats.valid = true;
         stats.dominant_horizontal = medianOf(abs_tx) >= medianOf(abs_ty);
+        stats.median_pair_score = medianOf(pair_scores);
 
-        std::vector<double> abs_main;
-        std::vector<double> abs_cross;
-        abs_main.reserve(abs_tx.size());
-        abs_cross.reserve(abs_tx.size());
-        for (const auto &relation: relations) {
-            if (!relation.ok) {
-                continue;
-            }
-            if (stats.dominant_horizontal) {
-                abs_main.push_back(std::abs(relation.tx));
-                abs_cross.push_back(std::abs(relation.ty));
-            } else {
-                abs_main.push_back(std::abs(relation.ty));
-                abs_cross.push_back(std::abs(relation.tx));
-            }
+        if (stats.dominant_horizontal) {
+            stats.median_main = medianOf(abs_tx);
+            stats.median_cross = medianOf(abs_ty);
+        } else {
+            stats.median_main = medianOf(abs_ty);
+            stats.median_cross = medianOf(abs_tx);
         }
 
-        stats.median_main = medianOf(abs_main);
-        stats.median_cross = medianOf(abs_cross);
-        stats.stable_min_main = std::max(20.0, stats.median_main * 0.30);
-        stats.stable_max_cross = std::max(40.0, stats.median_cross * 3.20 + 10.0);
-        stats.duplicate_max_main = std::max(10.0, stats.median_main * 0.15);
-        stats.duplicate_max_cross = std::max(10.0, stats.median_cross * 1.80 + 5.0);
+        stats.stable_min_main = std::max(18.0, stats.median_main * 0.40);
+        stats.stable_max_cross = std::max(35.0, stats.median_cross * 2.60 + 8.0);
+        stats.duplicate_max_main = std::max(8.0, stats.median_main * 0.12);
+        stats.duplicate_max_cross = std::max(8.0, stats.median_cross * 1.50 + 4.0);
         return stats;
     }
 
-    double mainMotion(const ConsecutiveRelation &relation, const MotionStats &stats) {
+    double mainMotion(const VisualRelation &relation, const MotionStats &stats) {
         return stats.dominant_horizontal ? relation.tx : relation.ty;
     }
 
-    double crossMotion(const ConsecutiveRelation &relation, const MotionStats &stats) {
+    double crossMotion(const VisualRelation &relation, const MotionStats &stats) {
         return stats.dominant_horizontal ? relation.ty : relation.tx;
     }
 
-    bool isDuplicateFrame(const ConsecutiveRelation &relation, const MotionStats &stats) {
-        if (!relation.ok) {
-            return false;
-        }
-        return std::abs(mainMotion(relation, stats)) <= stats.duplicate_max_main &&
-               std::abs(crossMotion(relation, stats)) <= stats.duplicate_max_cross;
+    double mainMotionPerStep(const VisualRelation &relation, const MotionStats &stats) {
+        return mainMotion(relation, stats) / static_cast<double>(std::max(1, relation.gap));
     }
 
-    bool isStableStripStep(const ConsecutiveRelation &relation, const MotionStats &stats) {
+    double crossMotionPerStep(const VisualRelation &relation, const MotionStats &stats) {
+        return crossMotion(relation, stats) / static_cast<double>(std::max(1, relation.gap));
+    }
+
+    bool isDuplicateFrame(const VisualRelation &relation, const MotionStats &stats) {
+        if (!relation.ok || relation.gap != 1) {
+            return false;
+        }
+        return std::abs(mainMotionPerStep(relation, stats)) <= stats.duplicate_max_main &&
+               std::abs(crossMotionPerStep(relation, stats)) <= stats.duplicate_max_cross;
+    }
+
+    bool isStableStripRelation(const VisualRelation &relation, const MotionStats &stats) {
         if (!relation.ok) {
             return false;
         }
-        return std::abs(mainMotion(relation, stats)) >= stats.stable_min_main &&
-               std::abs(crossMotion(relation, stats)) <= stats.stable_max_cross &&
+        return std::abs(mainMotionPerStep(relation, stats)) >= stats.stable_min_main &&
+               std::abs(crossMotionPerStep(relation, stats)) <= stats.stable_max_cross &&
                relation.scale >= 0.85 &&
                relation.scale <= 1.15 &&
                std::abs(relation.rotation_deg) <= 18.0;
     }
 
-    double boundaryMergeScore(const ConsecutiveRelation &relation, const MotionStats &stats) {
+    double stableRelationBonus(const MotionStats &stats, const int gap) {
+        return std::max(35.0, stats.median_pair_score * 1.40) * gapWeight(gap);
+    }
+
+    double uncertainRelationPenalty(const MotionStats &stats, const int gap) {
+        return std::max(18.0, stats.median_pair_score * 0.60) * gapWeight(gap);
+    }
+
+    double failedRelationPenalty(const MotionStats &stats, const int gap) {
+        const double base = gap == 1
+                                ? std::max(28.0, stats.median_pair_score)
+                                : std::max(12.0, stats.median_pair_score * 0.40);
+        return base * gapWeight(gap);
+    }
+
+    double directionConflictPenalty(const MotionStats &stats) {
+        return std::max(28.0, stats.median_pair_score * 0.80);
+    }
+
+    double cutPenalty(const MotionStats &stats) {
+        return std::max(55.0, stats.median_pair_score * 1.60);
+    }
+
+    double relationSegmentSupport(const VisualRelation &relation, const MotionStats &stats) {
         if (!relation.ok) {
-            return -1e9;
+            return -failedRelationPenalty(stats, relation.gap);
         }
 
-        double score = relation.score;
-        if (isStableStripStep(relation, stats)) {
-            score += 1000.0;
+        double score = relation.score * gapWeight(relation.gap);
+        if (isStableStripRelation(relation, stats)) {
+            score += stableRelationBonus(stats, relation.gap);
+        } else {
+            score -= uncertainRelationPenalty(stats, relation.gap);
         }
-
         return score;
     }
 
-    void appendGroup(VisualStripGroup &dst, const VisualStripGroup &src) {
-        dst.images.insert(dst.images.end(), src.images.begin(), src.images.end());
-        dst.image_ids.insert(dst.image_ids.end(), src.image_ids.begin(), src.image_ids.end());
+    double directionVoteWeight(const VisualRelation &relation) {
+        return gapWeight(relation.gap) * std::clamp(relation.inlier_ratio + 0.5, 0.5, 1.5);
     }
 
-    void prependGroup(VisualStripGroup &dst, const VisualStripGroup &src) {
-        dst.images.insert(dst.images.begin(), src.images.begin(), src.images.end());
-        dst.image_ids.insert(dst.image_ids.begin(), src.image_ids.begin(), src.image_ids.end());
+    std::vector<std::vector<VisualRelation> > buildShortRangeGraph(
+        const std::vector<cv::Mat> &images,
+        const std::vector<std::string> &image_ids,
+        const StitchTuning &tuning) {
+        std::vector<std::vector<VisualRelation> > graph(images.size());
+        for (size_t i = 0; i < images.size(); ++i) {
+            for (size_t gap = 1; gap <= kMaxNeighborGap && i + gap < images.size(); ++gap) {
+                auto relation = estimateRelation(images[i], images[i + gap], tuning);
+                relation.left_index = i;
+                relation.right_index = i + gap;
+                relation.gap = static_cast<int>(gap);
+                graph[i].push_back(relation);
+
+                std::cout << "[VisualGroup] edge " << i << "->" << (i + gap)
+                        << " (" << image_ids[i] << " -> " << image_ids[i + gap] << ")"
+                        << ": gap=" << gap
+                        << ", ok=" << (relation.ok ? "yes" : "no")
+                        << ", kp=" << relation.kp_left << "/" << relation.kp_right
+                        << ", matches=" << relation.good_matches
+                        << ", inliers=" << relation.inliers
+                        << ", tx=" << relation.tx
+                        << ", ty=" << relation.ty
+                        << ", scale=" << relation.scale
+                        << ", rot=" << relation.rotation_deg
+                        << std::endl;
+            }
+        }
+        return graph;
+    }
+
+    std::vector<std::vector<double> > buildSegmentScoreTable(
+        const std::vector<std::vector<VisualRelation> > &graph,
+        const MotionStats &stats) {
+        const size_t n = graph.size();
+        std::vector<std::vector<double> > segment_scores(
+            n, std::vector<double>(n, -std::numeric_limits<double>::infinity()));
+
+        for (size_t left = 0; left < n; ++left) {
+            double base_score = 0.0;
+            double positive_dir = 0.0;
+            double negative_dir = 0.0;
+
+            for (size_t right = left; right < n; ++right) {
+                const size_t start = right > kMaxNeighborGap ? right - kMaxNeighborGap : 0;
+                for (size_t edge_left = std::max(left, start); edge_left < right; ++edge_left) {
+                    const VisualRelation *relation = findRelation(graph, edge_left, right);
+                    if (!relation) {
+                        continue;
+                    }
+
+                    base_score += relationSegmentSupport(*relation, stats);
+                    if (isStableStripRelation(*relation, stats)) {
+                        if (mainMotion(*relation, stats) >= 0.0) {
+                            positive_dir += directionVoteWeight(*relation);
+                        } else {
+                            negative_dir += directionVoteWeight(*relation);
+                        }
+                    }
+                }
+
+                const size_t segment_len = right - left + 1;
+                if (segment_len < kMinSegmentImages) {
+                    continue;
+                }
+
+                double score = base_score;
+                score -= directionConflictPenalty(stats) * std::min(positive_dir, negative_dir);
+                segment_scores[left][right] = score;
+            }
+        }
+
+        return segment_scores;
+    }
+
+    std::vector<std::pair<size_t, size_t> > solveBestSegmentation(
+        const std::vector<std::vector<double> > &segment_scores,
+        const MotionStats &stats) {
+        const size_t n = segment_scores.size();
+        const double neg_inf = -std::numeric_limits<double>::infinity();
+        std::vector<double> best(n + 1, neg_inf);
+        std::vector<int> prev(n + 1, -1);
+        best[0] = 0.0;
+
+        for (size_t end = 0; end < n; ++end) {
+            for (size_t start = 0; start <= end; ++start) {
+                if (end - start + 1 < kMinSegmentImages) {
+                    continue;
+                }
+                if (!std::isfinite(segment_scores[start][end]) || !std::isfinite(best[start])) {
+                    continue;
+                }
+
+                double candidate = best[start] + segment_scores[start][end];
+                if (start > 0) {
+                    candidate -= cutPenalty(stats);
+                }
+
+                if (candidate > best[end + 1]) {
+                    best[end + 1] = candidate;
+                    prev[end + 1] = static_cast<int>(start);
+                }
+            }
+        }
+
+        if (prev[n] < 0) {
+            return {};
+        }
+
+        std::vector<std::pair<size_t, size_t> > segments;
+        for (size_t cursor = n; cursor > 0;) {
+            const int start = prev[cursor];
+            if (start < 0) {
+                return {};
+            }
+            segments.emplace_back(static_cast<size_t>(start), cursor - 1);
+            cursor = static_cast<size_t>(start);
+        }
+
+        std::reverse(segments.begin(), segments.end());
+        return segments;
     }
 }
 
@@ -313,27 +483,11 @@ std::vector<VisualStripGroup> VisualFlightGrouper::groupBoustrophedon(
         return {{images, image_ids}};
     }
 
-    std::cout << "[VisualGroup] analyzing " << images.size() << " sequential image pairs..." << std::endl;
+    std::cout << "[VisualGroup] building short-range graph: images=" << images.size()
+            << ", neighbor_gap=" << kMaxNeighborGap << std::endl;
 
-    std::vector<ConsecutiveRelation> relations;
-    relations.reserve(images.size() - 1);
-    for (size_t i = 0; i + 1 < images.size(); ++i) {
-        const auto relation = estimateRelation(images[i], images[i + 1], tuning);
-        relations.push_back(relation);
-        std::cout << "[VisualGroup] pair " << i << "->" << (i + 1)
-                << " (" << image_ids[i] << " -> " << image_ids[i + 1] << ")"
-                << ": ok=" << (relation.ok ? "yes" : "no")
-                << ", kp=" << relation.kp_left << "/" << relation.kp_right
-                << ", matches=" << relation.good_matches
-                << ", inliers=" << relation.inliers
-                << ", tx=" << relation.tx
-                << ", ty=" << relation.ty
-                << ", scale=" << relation.scale
-                << ", rot=" << relation.rotation_deg
-                << std::endl;
-    }
-
-    const MotionStats stats = summarizeMotion(relations);
+    const auto graph = buildShortRangeGraph(images, image_ids, tuning);
+    const MotionStats stats = summarizeMotion(graph);
     if (!stats.valid) {
         std::cout << "[VisualGroup] not enough reliable visual relations, fallback to single strip" << std::endl;
         return {{images, image_ids}};
@@ -343,92 +497,55 @@ std::vector<VisualStripGroup> VisualFlightGrouper::groupBoustrophedon(
             << (stats.dominant_horizontal ? "horizontal" : "vertical")
             << ", median_main=" << stats.median_main
             << ", median_cross=" << stats.median_cross
+            << ", median_pair_score=" << stats.median_pair_score
             << ", stable_min_main=" << stats.stable_min_main
             << ", stable_max_cross=" << stats.stable_max_cross
             << std::endl;
 
+    std::vector<cv::Mat> filtered_images;
+    std::vector<std::string> filtered_ids;
+    filtered_images.reserve(images.size());
+    filtered_ids.reserve(image_ids.size());
+    filtered_images.push_back(images.front());
+    filtered_ids.push_back(image_ids.front());
+    for (size_t i = 0; i + 1 < images.size(); ++i) {
+        const VisualRelation *adjacent = findRelation(graph, i, i + 1);
+        if (adjacent && isDuplicateFrame(*adjacent, stats)) {
+            std::cout << "[VisualGroup] remove near-duplicate frame: " << image_ids[i + 1] << std::endl;
+            continue;
+        }
+        filtered_images.push_back(images[i + 1]);
+        filtered_ids.push_back(image_ids[i + 1]);
+    }
+    if (filtered_images.size() < images.size()) {
+        std::cout << "[VisualGroup] rerun grouping after duplicate filtering: "
+                << images.size() << " -> " << filtered_images.size() << " images" << std::endl;
+        return groupBoustrophedon(filtered_images, filtered_ids, tuning);
+    }
+
+    const auto segment_scores = buildSegmentScoreTable(graph, stats);
+    const auto segments = solveBestSegmentation(segment_scores, stats);
+    if (segments.empty()) {
+        std::cout << "[VisualGroup] segmentation failed, fallback to single strip" << std::endl;
+        return {{images, image_ids}};
+    }
+
     std::vector<VisualStripGroup> groups;
-    VisualStripGroup current_group;
-    current_group.images.push_back(images.front());
-    current_group.image_ids.push_back(image_ids.front());
-
-    for (size_t i = 0; i < relations.size(); ++i) {
-        const auto &relation = relations[i];
-        const std::string &next_id = image_ids[i + 1];
-
-        if (isDuplicateFrame(relation, stats)) {
-            std::cout << "[VisualGroup] skip near-duplicate frame: " << next_id << std::endl;
-            continue;
+    groups.reserve(segments.size());
+    for (size_t gi = 0; gi < segments.size(); ++gi) {
+        const auto [begin, end] = segments[gi];
+        VisualStripGroup group;
+        for (size_t i = begin; i <= end; ++i) {
+            group.images.push_back(images[i]);
+            group.image_ids.push_back(image_ids[i]);
         }
-
-        const bool stable_step = isStableStripStep(relation, stats);
-        if (!stable_step && current_group.images.size() >= 3) {
-            std::cout << "[VisualGroup] strip break before: " << next_id << std::endl;
-            groups.push_back(std::move(current_group));
-            current_group = {};
-        }
-
-        current_group.images.push_back(images[i + 1]);
-        current_group.image_ids.push_back(next_id);
-    }
-
-    if (!current_group.images.empty()) {
-        groups.push_back(std::move(current_group));
-    }
-
-    for (size_t i = 0; groups.size() > 1 && i < groups.size();) {
-        if (groups[i].images.size() >= 3) {
-            ++i;
-            continue;
-        }
-
-        if (i == 0) {
-            std::cout << "[VisualGroup] merge small strip 0 into next strip" << std::endl;
-            prependGroup(groups[1], groups[0]);
-            groups.erase(groups.begin());
-            continue;
-        }
-
-        if (i + 1 >= groups.size()) {
-            std::cout << "[VisualGroup] merge trailing small strip " << i
-                    << " into previous strip" << std::endl;
-            appendGroup(groups[i - 1], groups[i]);
-            groups.erase(groups.begin() + static_cast<long>(i));
-            continue;
-        }
-
-        const auto prev_relation = estimateRelation(
-            groups[i - 1].images.back(),
-            groups[i].images.front(),
-            tuning);
-        const auto next_relation = estimateRelation(
-            groups[i].images.back(),
-            groups[i + 1].images.front(),
-            tuning);
-        const double prev_score = boundaryMergeScore(prev_relation, stats);
-        const double next_score = boundaryMergeScore(next_relation, stats);
-
-        std::cout << "[VisualGroup] small strip " << i
-                << " boundary scores: prev=" << prev_score
-                << " (matches=" << prev_relation.good_matches
-                << ", inliers=" << prev_relation.inliers
-                << ", ok=" << (prev_relation.ok ? "yes" : "no") << ")"
-                << ", next=" << next_score
-                << " (matches=" << next_relation.good_matches
-                << ", inliers=" << next_relation.inliers
-                << ", ok=" << (next_relation.ok ? "yes" : "no") << ")"
+        std::cout << "[VisualGroup] segment " << gi
+                << ": [" << begin << ", " << end << "]"
+                << ", images=" << group.images.size()
+                << ", ids=" << group.image_ids.front()
+                << " -> " << group.image_ids.back()
                 << std::endl;
-
-        if (next_score > prev_score) {
-            std::cout << "[VisualGroup] merge small strip " << i
-                    << " into next strip" << std::endl;
-            prependGroup(groups[i + 1], groups[i]);
-        } else {
-            std::cout << "[VisualGroup] merge small strip " << i
-                    << " into previous strip" << std::endl;
-            appendGroup(groups[i - 1], groups[i]);
-        }
-        groups.erase(groups.begin() + static_cast<long>(i));
+        groups.push_back(std::move(group));
     }
 
     std::cout << "[VisualGroup] final strip count: " << groups.size() << std::endl;
